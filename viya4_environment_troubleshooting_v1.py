@@ -10,7 +10,7 @@ import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.4.0") # Update this with each release
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.5.0") # Update this with each release
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "latest_version.txt"
@@ -470,7 +470,7 @@ def pod_resource_utilization(namespace, html_data):
             match = re.match(r'(\S+)\s+(\d+m?)\s+(\d+(?:Mi|Gi|Ki)?)', line)
             if match:
                 pod_name, cpu_usage, mem_usage = match.groups()
-                if pod_name.startswith('sas-authorization','sas-identities','sas-search','sas-arke','sas-studio-app','sas-studio','sas-launcher'):
+                if pod_name.startswith pod_name.startswith(('sas-authorization','sas-identities','sas-search','sas-arke','sas-studio-app','sas-studio','sas-launcher')):
                     usage_data[pod_name] = {
                         'cpu_usage': parse_resource_value(cpu_usage, is_cpu=True),
                         'mem_usage': parse_resource_value(mem_usage, is_cpu=False)
