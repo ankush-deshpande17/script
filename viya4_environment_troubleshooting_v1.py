@@ -5,7 +5,8 @@ import os
 import re
 import json
 from datetime import datetime
-
+import requests
+import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
@@ -614,8 +615,8 @@ def generate_html(namespace, html_data):
 def main():
     print(BANNER)
     print(INDEX)
-     print("Checking for script updates...")
-      check_for_updates()
+    print("Checking for script updates...")
+    check_for_updates()
     print("1. [🔑] Get Namespace from User Input")
     namespace = get_namespace()
     print(f"Using namespace: {namespace}")
