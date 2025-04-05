@@ -468,7 +468,7 @@ def pod_resource_utilization(namespace, html_data):
             match = re.match(r'(\S+)\s+(\d+m?)\s+(\d+(?:Mi|Gi|Ki)?)', line)
             if match:
                 pod_name, cpu_usage, mem_usage = match.groups()
-                if pod_name.startswith('sas-authorization','sas-identities','sas-search','sas-arke','sas-studio-app'):
+                if pod_name.startswith('sas-authorization','sas-identities','sas-search','sas-arke','sas-studio-app','sas-studio','sas-launcher'):
                     usage_data[pod_name] = {
                         'cpu_usage': parse_resource_value(cpu_usage, is_cpu=True),
                         'mem_usage': parse_resource_value(mem_usage, is_cpu=False)
