@@ -9,7 +9,10 @@ from datetime import datetime
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-
+SCRIPT_VERSION = "v1.0.0"  # Update this with each release
+GITHUB_REPO = "ankush-deshpande17/script"
+GITHUB_BRANCH = "main"
+VERSION_FILE = "latest_version.txt"
 # Updated ASCII Banner
 BANNER = """
 ==========================================================================================
@@ -74,6 +77,8 @@ HTML_FOOT = """
 </html>
 """
 
+
+
 def run_command(command):
     """Execute a shell command and return its output."""
     try:
@@ -102,6 +107,73 @@ def print_table(headers, rows):
         print(formatted_row)
     
     print(horizontal_border)
+
+
+def check_for_updates():
+    """Check for a newer version of the script on GitHub and update if requested."""
+    repo_url = f"https://github.com/{GITHUB_REPO}"
+    version_file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{VERSION_FILE}"
+    script_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/viya4_environment_troubleshooting_v1.py"
+
+    try:
+        version_response = requests.get(version_file_url, timeout=5)
+        version_response.raise_for_status()
+        latest_version = version_response.text.strip()
+
+        current_version = SCRIPT_VERSION.lstrip('v')
+
+        latest_ver_num = int(''.join(latest_version.split('.')))
+        current_ver_num = int(''.join(current_version.split('.')))
+
+        if latest_ver_num > current_ver_num:
+            print(f"{YELLOW}WARNING: A new version is available! (v{latest_version} vs current {SCRIPT_VERSION}){RESET}")
+            print(f"Download the latest version from: {repo_url}")
+            update = input(f"{YELLOW}Do you want to update the script now? (y/n): {RESET}").strip().lower()
+
+            if update in ('y', 'yes'):
+                script_response = requests.get(script_url, timeout=5)
+                script_response.raise_for_status()
+                latest_script = script_response.text
+
+                script_path = os.path.realpath(__file__)
+
+                if not os.access(script_path, os.W_OK):
+                    print(f"{YELLOW}Update requires write permissions to {script_path}.{RESET}")
+                    print(f"{YELLOW}Attempting to update with sudo...{RESET}")
+                    temp_path = "/tmp/viya4_environment_troubleshooting_v1.py.tmp"
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        f.write(latest_script)
+                    try:
+                        subprocess.run(['sudo', 'mv', temp_path, script_path], check=True)
+                        subprocess.run(['sudo', 'chmod', '+x', script_path], check=True)
+                        print("INFO: Script updated successfully. Please re-run the script.")
+                        sys.exit(0)
+                    except subprocess.CalledProcessError as e:
+                        print(f"ERROR: Update failed: {e}")
+                        print(f"INFO: Please update manually from {repo_url}")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                else:
+                    temp_path = script_path + ".tmp"
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        f.write(latest_script)
+                    try:
+                        shutil.move(temp_path, script_path)
+                        os.chmod(script_path, 0o755)
+                        print("INFO: Script updated successfully. Restarting...")
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                    except Exception as e:
+                        print(f"ERROR: Failed to update script: {e}")
+                        print(f"INFO: Please update manually from {repo_url}")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+        else:
+            print(f"Script is up to date (version {SCRIPT_VERSION}).")
+    except requests.RequestException as e:
+        print(f"Failed to check for updates: {e}")
+        print(f"INFO: You can manually check the latest version at {repo_url}")
+    except Exception as e:
+        print(f"Unexpected error during update check: {e}")
 
 def get_namespace():
     """Get namespace from user input."""
@@ -542,7 +614,8 @@ def generate_html(namespace, html_data):
 def main():
     print(BANNER)
     print(INDEX)
-    
+     print("Checking for script updates...")
+      check_for_updates()
     print("1. [🔑] Get Namespace from User Input")
     namespace = get_namespace()
     print(f"Using namespace: {namespace}")
