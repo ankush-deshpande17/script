@@ -10,7 +10,7 @@ import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-SCRIPT_VERSION = "v1.0.0"  # Update this with each release
+SCRIPT_VERSION = "v1.3.0"  # Update this with each release
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "latest_version.txt"
