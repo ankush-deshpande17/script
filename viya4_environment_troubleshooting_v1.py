@@ -10,7 +10,7 @@ import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-SCRIPT_VERSION = "v1.4.0"  # Update this with each release
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.4.0") # Update this with each release
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "latest_version.txt"
@@ -148,6 +148,7 @@ def check_for_updates():
                         subprocess.run(['sudo', 'mv', temp_path, script_path], check=True)
                         subprocess.run(['sudo', 'chmod', '+x', script_path], check=True)
                         print("INFO: Script updated successfully. Please re-run the script.")
+
                         sys.exit(0)
                     except subprocess.CalledProcessError as e:
                         print(f"ERROR: Update failed: {e}")
@@ -162,6 +163,7 @@ def check_for_updates():
                         shutil.move(temp_path, script_path)
                         os.chmod(script_path, 0o755)
                         print("INFO: Script updated successfully. Restarting...")
+                        os.environ["SCRIPT_VERSION"] = latest_version
                         os.execv(sys.executable, [sys.executable] + sys.argv)
                     except Exception as e:
                         print(f"ERROR: Failed to update script: {e}")
