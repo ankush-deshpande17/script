@@ -439,30 +439,34 @@ def check_pods_for_errors(namespace, html_data):
     html_data['errors'] = {'headers': ["POD_NAME", "DATE", "TIME", "LOG_CODE", "MESSAGE"], 'rows': log_entries}
 
 def pod_resource_utilization(namespace, html_data):
-    """List resource utilization for sas-authorization pods against limits only."""
-    print(f"\n7. [📈] Pod Resource Utilization (Actual vs Limits) for sas-authorization...")
+    """List resource utilization for the specified pods against limits."""
+    print(f"\n7. [📈] Pod Resource Utilization (Actual vs Limits) for the specified pods...")
     print("----------------------------------------")
-    
-    # Get pod list, filter for sas-authorization
+
+    # Define the pod prefixes to check
+    pod_prefixes = ('sas-authorization', 'sas-identities', 'sas-search', 'sas-arke', 'sas-studio-app', 'sas-studio', 'sas-launcher')
+
+    # Get pod list, filter for the specified pods
     pod_output = run_command(f"kubectl get pods -n {namespace} --no-headers")
     if not pod_output:
         print(f"Failed to list pods in namespace '{namespace}'.")
         html_data['pod_resources'] = {'headers': ["Message"], 'rows': [["Failed to list pods"]]}
         return
-    
-    pods = [line.split()[0] for line in pod_output.split('\n') if line.strip() and line.split()[0].startswith('sas-authorization')]
+
+    pods = [line.split()[0] for line in pod_output.split('\n') if line.strip() and line.split()[0].startswith(pod_prefixes)]
+
     if not pods:
-        print("No sas-authorization pods found in the namespace.")
-        html_data['pod_resources'] = {'headers': ["Message"], 'rows': [["No sas-authorization pods found"]]}
+        print("No specified pods found in the namespace.")
+        html_data['pod_resources'] = {'headers': ["Message"], 'rows': [["No specified pods found"]]}
         return
-    
+
     # Get actual usage from kubectl top
     top_output = run_command(f"kubectl top pods -n {namespace} --no-headers")
     if not top_output:
         print("Failed to get pod utilization. Ensure 'kubectl top' is supported and metrics-server is running.")
         html_data['pod_resources'] = {'headers': ["Message"], 'rows': [["Failed to get pod utilization"]]}
         return
-    
+
     # Parse top output with flexible whitespace handling
     usage_data = {}
     for line in top_output.split('\n'):
@@ -470,26 +474,26 @@ def pod_resource_utilization(namespace, html_data):
             match = re.match(r'(\S+)\s+(\d+m?)\s+(\d+(?:Mi|Gi|Ki)?)', line)
             if match:
                 pod_name, cpu_usage, mem_usage = match.groups()
-                if pod_name.startswith pod_name.startswith(('sas-authorization','sas-identities','sas-search','sas-arke','sas-studio-app','sas-studio','sas-launcher')):
+                if pod_name.startswith(pod_prefixes):
                     usage_data[pod_name] = {
                         'cpu_usage': parse_resource_value(cpu_usage, is_cpu=True),
                         'mem_usage': parse_resource_value(mem_usage, is_cpu=False)
                     }
-    
+
     headers = ["Pod Name", "CPU Usage", "CPU Lim", "CPU Lim %", "Memory Usage", "Mem Lim", "Mem Lim %"]
     table_data = []
-    
+
     for pod in pods:
         describe_output = run_command(f"kubectl describe pod -n {namespace} {pod}")
         if not describe_output:
             print(f"Failed to describe pod '{pod}'.")
             continue
-        
+
         cpu_lim, mem_lim = 0, 0  # Only parse limits
         in_containers = False
         lines = describe_output.split('\n')
         i = 0
-        
+
         while i < len(lines):
             line = lines[i].strip()
             if line.startswith("Containers:"):
@@ -506,21 +510,21 @@ def pod_resource_utilization(namespace, html_data):
                         break
                     i += 1
             i += 1
-        
+
         pod_usage = usage_data.get(pod, {'cpu_usage': 0, 'mem_usage': 0})
         cpu_usage = pod_usage['cpu_usage']
         mem_usage = pod_usage['mem_usage']
-        
+
         cpu_lim_pct = float(cpu_usage / cpu_lim * 100) if cpu_lim else 0
         mem_lim_pct = float(mem_usage / mem_lim * 100) if mem_lim else 0
-        
+
         row = [
             pod,
             f"{cpu_usage:.1f}m", f"{cpu_lim:.1f}m", f"{cpu_lim_pct:.1f}%",
             f"{mem_usage:.1f}Gi", f"{mem_lim:.1f}Gi", f"{mem_lim_pct:.1f}%"
         ]
         table_data.append((row, mem_lim_pct > 90, False))
-    
+
     print_table(headers, [row for row, _, _ in table_data])
     html_data['pod_resources'] = {'headers': headers, 'rows': table_data}
 
