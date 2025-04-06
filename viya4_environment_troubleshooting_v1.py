@@ -10,7 +10,7 @@ import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.7.0") # Update this with each release
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.8.0") # Update this with each release
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "latest_version.txt"
@@ -444,7 +444,7 @@ def pod_resource_utilization(namespace, html_data):
     print("----------------------------------------")
 
     # Define the pod prefixes to check
-    pod_prefixes = ('sas-authorization', 'sas-identities', 'sas-search', 'sas-arke', 'sas-studio-app', 'sas-studio', 'sas-launcher','sas-credentials','sas-crunchy-platform-postgres')
+    pod_prefixes = ('sas-authorization', 'sas-identities', 'sas-search', 'sas-arke', 'sas-studio-app', 'sas-studio', 'sas-launcher','sas-credentials','sas-crunchy-platform-postgres','sas-rabbitmq-sevrer','sas-consul-server')
 
     # Get pod list, filter for the specified pods
     pod_output = run_command(f"kubectl get pods -n {namespace} --no-headers")
