@@ -10,7 +10,7 @@ import shutil
 # ANSI color codes for terminal
 YELLOW = "\033[93m"
 RESET = "\033[0m"
-SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.5.0") # Update this with each release
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.6.0") # Update this with each release
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "latest_version.txt"
@@ -444,7 +444,7 @@ def pod_resource_utilization(namespace, html_data):
     print("----------------------------------------")
 
     # Define the pod prefixes to check
-    pod_prefixes = ('sas-authorization', 'sas-identities', 'sas-search', 'sas-arke', 'sas-studio-app', 'sas-studio', 'sas-launcher')
+    pod_prefixes = ('sas-authorization', 'sas-identities', 'sas-search', 'sas-arke', 'sas-studio-app', 'sas-studio', 'sas-launcher','sas-credentials')
 
     # Get pod list, filter for the specified pods
     pod_output = run_command(f"kubectl get pods -n {namespace} --no-headers")
@@ -588,7 +588,7 @@ def generate_html(namespace, html_data):
                     content += "----------------------------------------\n"
             content += "</pre>\n"
         
-        content += "<h2>Pod Resource Utilization (Actual vs Limits) for sas-authorization</h2>\n"
+        content += "<h2>Pod Resource Utilization (Actual vs Limits)</h2>\n"
         if 'pod_resources' in html_data:
             content += "<table>\n<tr>" + "".join(f"<th>{h}</th>" for h in html_data['pod_resources']['headers']) + "</tr>\n"
             for row, lim_high, _ in html_data['pod_resources']['rows']:
