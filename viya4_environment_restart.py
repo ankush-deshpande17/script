@@ -56,7 +56,7 @@ final_pod_table = ""
 consul_issues = False
 post_cleanup_jobs = ""
 post_cleanup_pods = ""
-SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.0.0")  # Added for check_for_updates
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.1.0")  # Added for check_for_updates
 GITHUB_REPO = "ankush-deshpande17/script"  # Added for check_for_updates
 GITHUB_BRANCH = "main"  # Added for check_for_updates
 VERSION_FILE = "restart_version.txt"  # Added for check_for_updates
@@ -480,12 +480,28 @@ def delete_non_running_pods(namespace):
     print(step_title)
     print("=" * len(step_title))
     
+    # Define exempted job/pod name patterns
+    exempt_patterns = ["sas-scheduled-backup", "repo1-full", "repo1-incr"]
+    
+    # Get list of jobs
     result = subprocess.run(["kubectl", "get", "jobs", "-n", namespace], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     lines = result.stdout.strip().split("\n")[1:]
-    jobs_to_delete = [line.split()[0] for line in lines if line and any(status in line for status in ["0/1", "0/2", "1/1"])]
+    jobs_to_delete = []
+    
+    # Filter jobs that are non-running and not exempted
+    for line in lines:
+        if line:
+            job_name = line.split()[0]
+            # Check if job matches any exempt pattern
+            if any(pattern in job_name for pattern in exempt_patterns):
+                print(f"Skipping exempted job '{job_name}' (matches exempt pattern)")
+                continue
+            # Check if job is non-running (Completed or Errored)
+            if any(status in line for status in ["0/1", "0/2", "1/1"]):
+                jobs_to_delete.append(job_name)
     
     if not jobs_to_delete:
-        print("No non-running jobs found to delete.")
+        print("No non-running jobs found to delete (after applying exemptions).")
     else:
         for job in jobs_to_delete:
             try:
@@ -503,6 +519,7 @@ def delete_non_running_pods(namespace):
     result_pods = subprocess.run(["kubectl", "get", "pods", "-n", namespace], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     print(result_pods.stdout or "No pods remaining.")
     post_cleanup_pods = result_pods.stdout or "No pods remaining."
+
 
 def process_consul_pvc(namespace, pod, pvc_mapping):
     pvc = pvc_mapping[pod]
