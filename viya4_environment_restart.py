@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 # Version and GitHub settings
-SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.1.0")
+SCRIPT_VERSION = "v1.0.0"  # Current version
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -391,11 +391,19 @@ def main():
     has_update, latest_version = check_for_updates()
     if has_update:
         logger.info(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
-        if update_script():
-            logger.info("Script updated successfully. Please restart the application.")
-            sys.exit(0)
+        print(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
+        user_choice = input("Would you like to update? (Yes/No): ").strip().lower()
+        logger.info(f"User chose to {'update' if user_choice == 'yes' else 'skip update'}")
+        if user_choice == 'yes':
+            if update_script():
+                logger.info("Script updated successfully. Proceeding with execution.")
+                print("✅ Script updated successfully. Proceeding with execution.")
+            else:
+                logger.error("Failed to update script. Proceeding with current version.")
+                print("❌ Failed to update script. Proceeding with current version.")
         else:
-            logger.error("Failed to update the script. Continuing with the current version.")
+            logger.info("Skipping update. Proceeding with current version.")
+            print("Skipping update. Proceeding with current version.")
     else:
         logger.info(f"Script is up-to-date. Running version: {SCRIPT_VERSION}")
 
