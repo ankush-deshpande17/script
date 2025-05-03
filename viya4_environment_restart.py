@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 # Version and GitHub settings
-SCRIPT_VERSION = "v1.2.0"  # Updated version
+SCRIPT_VERSION = "v1.3.0"
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -58,6 +58,16 @@ def print_step_header(step_num, step_name, icon):
     print(f"\n{'=' * 50}")
     print(f"Step {step_num}: {icon} {step_name}")
     print(f"{'=' * 50}")
+
+def countdown(seconds, message):
+    """Display a countdown timer that updates in place"""
+    for i in range(seconds, -1, -1):
+        # Use \r to return to start of line, pad with spaces to clear previous output
+        print(f"\r{message}: {i}  ", end="", flush=True)
+        sys.stdout.flush()
+        time.sleep(1)
+    # Move to next line after countdown
+    print()
 
 def parse_ci(ci):
     """Step 0: Parse Configuration Item to extract NS, AKSN, and RGN"""
@@ -416,7 +426,6 @@ def backup_consul_raft(ns, ticket):
     
     def backup_raft_for_pod(pod_name):
         """Helper function to backup raft.db for a single pod"""
-        logger.debug(f"Backing up raft.db for pod {pod_name}")
         # Check if source file exists
         check_cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "test", "-f", source_file]
         try:
@@ -465,6 +474,142 @@ def backup_consul_raft(ns, ticket):
     print(f"\n✅ Consul Raft.db backups completed for all {len(consul_pods)} pods")
     print(f"⏱️ Time taken to backup raft.db files: {minutes} minutes, {seconds} seconds")
 
+def stop_sas_environment(ns, ticket):
+    """
+    Step 5: Stop SAS Environment
+    Submits a Kubernetes job to stop the SAS environment, monitors the job's pod,
+    tails the last 4 lines of the pod's log, waits for completion, ensures graceful
+    termination, and forcefully deletes stuck pods (except prometheus-pushgateway).
+    """
+    print_step_header(5, "Stop SAS Environment", "🛑")
+    
+    # Start timing
+    start_time = time.time()
+    
+    # Submit the stop job
+    timestamp = str(int(time.time()))
+    job_name = f"sas-stop-all-{timestamp}"
+    cmd = ["kubectl", "create", "job", job_name, "--from", "cronjobs/sas-stop-all", "-n", ns]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(f"✅ Submitted stop job: {job_name}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to submit stop job: {e.stderr}")
+        sys.exit(1)
+    
+    # Wait for pod creation
+    countdown(10, "⏳ Waiting for stop job pod to be created")
+    
+    # Find the pod created by the job
+    cmd = ["kubectl", "get", "pods", "-n", ns, "-l", f"job-name={job_name}", "-o", "json"]
+    max_attempts = 30
+    attempt = 0
+    pod_name = None
+    while attempt < max_attempts:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            pods_data = json.loads(result.stdout)
+            pods = pods_data.get("items", [])
+            if pods:
+                pod = pods[0]
+                pod_name = pod["metadata"]["name"]
+                pod_phase = pod["status"].get("phase")
+                print(f"📋 Found stop job pod: {pod_name} (Phase: {pod_phase})")
+                break
+            else:
+                attempt += 1
+                time.sleep(2)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            attempt += 1
+            time.sleep(2)
+    
+    if not pod_name:
+        print(f"❌ Error: Stop job pod not found after {max_attempts * 2} seconds")
+        sys.exit(1)
+    
+    # Tail the last 4 lines of the pod's log
+    print(f"\n📜 Tailing last 4 lines of pod {pod_name} logs:")
+    cmd = ["kubectl", "logs", "-n", ns, pod_name, "--tail=4"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(result.stdout.strip())
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Warning: Failed to tail logs for pod {pod_name}: {e.stderr}")
+    
+    # Wait for pod to complete
+    print(f"\n⏳ Waiting for pod {pod_name} to complete")
+    while True:
+        try:
+            cmd = ["kubectl", "get", "pod", "-n", ns, pod_name, "-o", "json"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            pod_data = json.loads(result.stdout)
+            pod_phase = pod_data["status"].get("phase")
+            if pod_phase == "Succeeded":
+                print(f"✅ Stop job pod {pod_name} completed successfully")
+                break
+            elif pod_phase == "Failed":
+                print(f"❌ Error: Stop job pod {pod_name} failed")
+                sys.exit(1)
+            time.sleep(5)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            print(f"❌ Error checking pod status: {e}")
+            sys.exit(1)
+    
+    # Wait for graceful termination
+    countdown(60, "⏳ Waiting for pods to terminate gracefully")
+    
+    # Identify prometheus-pushgateway pods
+    exclude_pods = set()
+    try:
+        cmd = ["kubectl", "get", "pods", "-n", ns, "-l", "app=prometheus-pushgateway", "-o", "json"]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        pods_data = json.loads(result.stdout)
+        exclude_pods = {pod["metadata"]["name"] for pod in pods_data.get("items", [])}
+        if exclude_pods:
+            print(f"📋 Excluding prometheus-pushgateway pods from deletion: {', '.join(exclude_pods)}")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠️ Warning: Failed to list prometheus-pushgateway pods: {e.stderr}")
+    
+    # Check for stuck pods and delete them
+    cmd = ["kubectl", "get", "pods", "-n", ns, "-o", "json"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        pods_data = json.loads(result.stdout)
+        stuck_pods = []
+        for pod in pods_data.get("items", []):
+            pod_name = pod["metadata"]["name"]
+            pod_phase = pod["status"].get("phase")
+            # Check for Running or pods stuck in Terminating (deletionTimestamp exists)
+            if pod_name not in exclude_pods and (pod_phase == "Running" or pod.get("metadata", {}).get("deletionTimestamp")):
+                stuck_pods.append(pod_name)
+        
+        if stuck_pods:
+            print(f"📋 Found {len(stuck_pods)} stuck pods: {', '.join(stuck_pods)}")
+            for pod_name in stuck_pods:
+                cmd = ["kubectl", "delete", "pod", "-n", ns, pod_name, "--force", "--grace-period=0"]
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    print(f"✅ Forcefully deleted stuck pod: {pod_name}")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to delete pod {pod_name}: {e.stderr}")
+        else:
+            print("✅ No stuck pods found")
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"❌ Failed to check for stuck pods: {e}")
+        sys.exit(1)
+    
+    # List running pods
+    print("\n📋 Listing pods after stop operation:")
+    list_running_pods(ns)
+    
+    # Calculate and display time taken
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    print(f"\n✅ SAS environment stop completed")
+    print(f"⏱️ Time taken to stop SAS environment: {minutes} minutes, {seconds} seconds")
+
 def main():
     # Check for updates
     has_update, latest_version = check_for_updates()
@@ -509,6 +654,8 @@ def main():
     create_backup_logs(env_vars['NS'], ticket)
     
     backup_consul_raft(env_vars['NS'], ticket)
+    
+    stop_sas_environment(env_vars['NS'], ticket)
     
     print(f"\n🎉 Automation completed successfully!")
 
