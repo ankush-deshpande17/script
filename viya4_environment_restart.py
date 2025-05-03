@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 # Version and GitHub settings
-SCRIPT_VERSION = "v1.3.0"
+SCRIPT_VERSION = "v1.4.0"  # Updated version
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -478,8 +478,8 @@ def stop_sas_environment(ns, ticket):
     """
     Step 5: Stop SAS Environment
     Submits a Kubernetes job to stop the SAS environment, monitors the job's pod,
-    tails the last 4 lines of the pod's log, waits for completion, ensures graceful
-    termination, and forcefully deletes stuck pods (except prometheus-pushgateway).
+    displays initial and final pod state, ensures graceful termination, and forcefully
+    deletes stuck pods (except prometheus-pushgateway).
     """
     print_step_header(5, "Stop SAS Environment", "🛑")
     
@@ -527,15 +527,6 @@ def stop_sas_environment(ns, ticket):
         print(f"❌ Error: Stop job pod not found after {max_attempts * 2} seconds")
         sys.exit(1)
     
-    # Tail the last 4 lines of the pod's log
-    print(f"\n📜 Tailing last 4 lines of pod {pod_name} logs:")
-    cmd = ["kubectl", "logs", "-n", ns, pod_name, "--tail=4"]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(result.stdout.strip())
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️ Warning: Failed to tail logs for pod {pod_name}: {e.stderr}")
-    
     # Wait for pod to complete
     print(f"\n⏳ Waiting for pod {pod_name} to complete")
     while True:
@@ -546,6 +537,11 @@ def stop_sas_environment(ns, ticket):
             pod_phase = pod_data["status"].get("phase")
             if pod_phase == "Succeeded":
                 print(f"✅ Stop job pod {pod_name} completed successfully")
+                # Show final pod state
+                cmd = ["kubectl", "get", "pod", "-n", ns, pod_name]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                pod_status = result.stdout.strip().split('\n')[-1]  # Get last line (pod info)
+                print(f"📋 Final pod state: {pod_status}")
                 break
             elif pod_phase == "Failed":
                 print(f"❌ Error: Stop job pod {pod_name} failed")
@@ -610,6 +606,151 @@ def stop_sas_environment(ns, ticket):
     print(f"\n✅ SAS environment stop completed")
     print(f"⏱️ Time taken to stop SAS environment: {minutes} minutes, {seconds} seconds")
 
+def delete_jobs(ns, ticket):
+    """
+    Step 6: Deletion of Jobs
+    Deletes Kubernetes jobs with names containing sas-backup-purge-job,
+    sas-update-checker, sas-import-data-loader, or sas-deployment-operator-autoupdate.
+    """
+    print_step_header(6, "Deletion of Jobs", "🗑️")
+    
+    # Start timing
+    start_time = time.time()
+    
+    # Job patterns to delete
+    job_patterns = [
+        "sas-backup-purge-job",
+        "sas-update-checker",
+        "sas-import-data-loader",
+        "sas-deployment-operator-autoupdate"
+    ]
+    
+    # Get all jobs in the namespace
+    cmd = ["kubectl", "get", "jobs", "-n", ns, "-o", "json"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        jobs_data = json.loads(result.stdout)
+        jobs = jobs_data.get("items", [])
+        jobs_to_delete = [
+            job["metadata"]["name"] for job in jobs
+            if any(pattern in job["metadata"]["name"] for pattern in job_patterns)
+        ]
+        
+        if not jobs_to_delete:
+            print("✅ No matching jobs found to delete")
+        else:
+            print(f"📋 Found {len(jobs_to_delete)} jobs to delete: {', '.join(jobs_to_delete)}")
+            for job_name in jobs_to_delete:
+                cmd = ["kubectl", "delete", "job", "-n", ns, job_name]
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    print(f"✅ Deleted job: {job_name}")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to delete job {job_name}: {e.stderr}")
+        
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"❌ Failed to list jobs: {e}")
+        sys.exit(1)
+    
+    # Calculate and display time taken
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    print(f"\n✅ Job deletion completed")
+    print(f"⏱️ Time taken to delete jobs: {minutes} minutes, {seconds} seconds")
+
+def start_viya_environment(ns, ticket):
+    """
+    Step 7: Start Viya Environment
+    Submits a Kubernetes job to start the SAS Viya environment, monitors the job's pod,
+    displays initial and final pod state, and waits for pods to start.
+    """
+    print_step_header(7, "Start Viya Environment", "🚀")
+    
+    # Start timing
+    start_time = time.time()
+    
+    # Submit the start job
+    timestamp = str(int(time.time()))
+    job_name = f"sas-start-all-{timestamp}"
+    cmd = ["kubectl", "create", "job", job_name, "--from", "cronjobs/sas-start-all", "-n", ns]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        print(f"✅ Submitted start job: {job_name}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to submit start job: {e.stderr}")
+        sys.exit(1)
+    
+    # Wait for pod creation
+    countdown(10, "⏳ Waiting for start job pod to be created")
+    
+    # Find the pod created by the job
+    cmd = ["kubectl", "get", "pods", "-n", ns, "-l", f"job-name={job_name}", "-o", "json"]
+    max_attempts = 30
+    attempt = 0
+    pod_name = None
+    while attempt < max_attempts:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            pods_data = json.loads(result.stdout)
+            pods = pods_data.get("items", [])
+            if pods:
+                pod = pods[0]
+                pod_name = pod["metadata"]["name"]
+                pod_phase = pod["status"].get("phase")
+                print(f"📋 Found start job pod: {pod_name} (Phase: {pod_phase})")
+                break
+            else:
+                attempt += 1
+                time.sleep(2)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            attempt += 1
+            time.sleep(2)
+    
+    if not pod_name:
+        print(f"❌ Error: Start job pod not found after {max_attempts * 2} seconds")
+        sys.exit(1)
+    
+    # Wait for pod to complete
+    print(f"\n⏳ Waiting for pod {pod_name} to complete")
+    while True:
+        try:
+            cmd = ["kubectl", "get", "pod", "-n", ns, pod_name, "-o", "json"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            pod_data = json.loads(result.stdout)
+            pod_phase = pod_data["status"].get("phase")
+            if pod_phase == "Succeeded":
+                print(f"✅ Start job pod {pod_name} completed successfully")
+                # Show final pod state
+                cmd = ["kubectl", "get", "pod", "-n", ns, pod_name]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                pod_status = result.stdout.strip().split('\n')[-1]  # Get last line (pod info)
+                print(f"📋 Final pod state: {pod_status}")
+                break
+            elif pod_phase == "Failed":
+                print(f"❌ Error: Start job pod {pod_name} failed")
+                sys.exit(1)
+            time.sleep(5)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            print(f"❌ Error checking pod status: {e}")
+            sys.exit(1)
+    
+    # Wait for pods to start
+    countdown(60, "⏳ Waiting for pods to start")
+    
+    # List running pods
+    print("\n📋 Listing pods after start operation:")
+    list_running_pods(ns)
+    
+    # Calculate and display time taken
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    print(f"\n✅ SAS Viya environment start completed")
+    print(f"⏱️ Time taken to start SAS Viya environment: {minutes} minutes, {seconds} seconds")
+
 def main():
     # Check for updates
     has_update, latest_version = check_for_updates()
@@ -656,6 +797,10 @@ def main():
     backup_consul_raft(env_vars['NS'], ticket)
     
     stop_sas_environment(env_vars['NS'], ticket)
+    
+    delete_jobs(env_vars['NS'], ticket)
+    
+    start_viya_environment(env_vars['NS'], ticket)
     
     print(f"\n🎉 Automation completed successfully!")
 
