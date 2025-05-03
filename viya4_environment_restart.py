@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 logger = logging.getLogger(__name__)
 
 # Version and GitHub settings
-SCRIPT_VERSION = "v1.1.0"  # Current version
+SCRIPT_VERSION = "v1.2.0"  # Updated version
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -386,6 +386,85 @@ def create_backup_logs(ns, ticket):
         print(f"❌ Failed to parse pod JSON data: {e}")
         sys.exit(1)
 
+def backup_consul_raft(ns, ticket):
+    """Step 4: Backup Consul Raft.db File"""
+    print_step_header(4, "Backup Consul Raft.db File", "💾")
+    
+    # Start timing
+    start_time = time.time()
+    
+    # Source and destination paths
+    source_file = "/consul/data/raft/raft.db"
+    dest_file = f"/consul/data/raft/raft.db_{ticket}"
+    
+    # Get Consul server pods
+    cmd = ["kubectl", "get", "pods", "-n", ns, "-l", "app=sas-consul-server", "-o", "json"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        pods_data = json.loads(result.stdout)
+        consul_pods = [pod["metadata"]["name"] for pod in pods_data.get("items", []) if pod["status"].get("phase") == "Running"]
+        if not consul_pods:
+            print(f"❌ Error: No running sas-consul-server pods found in namespace {ns}")
+            sys.exit(1)
+        print(f"📋 Found {len(consul_pods)} running sas-consul-server pods: {', '.join(consul_pods)}")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Failed to list sas-consul-server pods: {e.stderr}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"❌ Failed to parse pod JSON data: {e}")
+        sys.exit(1)
+    
+    def backup_raft_for_pod(pod_name):
+        """Helper function to backup raft.db for a single pod"""
+        logger.debug(f"Backing up raft.db for pod {pod_name}")
+        # Check if source file exists
+        check_cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "test", "-f", source_file]
+        try:
+            subprocess.run(check_cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            return (pod_name, False, f"Source file {source_file} does not exist in pod {pod_name}: {e.stderr}")
+        
+        # Backup command
+        backup_cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "cp", source_file, dest_file]
+        try:
+            result = subprocess.run(backup_cmd, capture_output=True, text=True, check=True)
+            print(f"✅ Backed up {source_file} to {dest_file} in pod {pod_name}")
+            return (pod_name, True, None)
+        except subprocess.CalledProcessError as e:
+            return (pod_name, False, f"Failed to backup {source_file} to {dest_file} in pod {pod_name}: {e.stderr}")
+    
+    # Backup raft.db for all pods in parallel
+    backup_results = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_pod = {executor.submit(backup_raft_for_pod, pod): pod for pod in consul_pods}
+        for future in as_completed(future_to_pod):
+            pod_name = future_to_pod[future]
+            result = future.result()
+            backup_results.append(result)
+    
+    # Display results
+    print(f"\n📋 Consul Raft.db Backup Summary:")
+    print("=" * 18)
+    for pod_name, success, error in sorted(backup_results, key=lambda x: x[0]):
+        status = "✅" if success else "❌"
+        print(f"- {pod_name}: {status}")
+        if error and not success:
+            print(f"  Error: {error}")
+    
+    # Check for failures
+    failed_backups = [r for r in backup_results if not r[1]]
+    if failed_backups:
+        print(f"❌ Error: Failed to backup raft.db for {len(failed_backups)} pod(s). See errors above.")
+        sys.exit(1)
+    
+    # Calculate and display time taken
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    print(f"\n✅ Consul Raft.db backups completed for all {len(consul_pods)} pods")
+    print(f"⏱️ Time taken to backup raft.db files: {minutes} minutes, {seconds} seconds")
+
 def main():
     # Check for updates
     has_update, latest_version = check_for_updates()
@@ -428,6 +507,8 @@ def main():
     list_running_pods(env_vars['NS'])
     
     create_backup_logs(env_vars['NS'], ticket)
+    
+    backup_consul_raft(env_vars['NS'], ticket)
     
     print(f"\n🎉 Automation completed successfully!")
 
