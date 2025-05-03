@@ -8,7 +8,50 @@ from datetime import datetime
 import re
 import time
 import json
+import requests
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Version and GitHub settings
+SCRIPT_VERSION = os.environ.get("SCRIPT_VERSION", "v1.1.0")
+GITHUB_REPO = "ankush-deshpande17/script"
+GITHUB_BRANCH = "main"
+VERSION_FILE = "restart_version.txt"
+
+def check_for_updates():
+    """Check for script updates from GitHub"""
+    version_file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{VERSION_FILE}"
+    try:
+        response = requests.get(version_file_url, timeout=5)
+        response.raise_for_status()
+        latest_version = response.text.strip()
+        current_version = SCRIPT_VERSION.lstrip('v')
+        latest_ver_num = int(''.join(latest_version.split('.')))
+        current_ver_num = int(''.join(current_version.split('.')))
+        return latest_ver_num > current_ver_num, latest_version
+    except Exception as e:
+        logger.warning(f"Could not check for updates: {e}")
+        return False, None
+
+def update_script():
+    """Update the script from GitHub"""
+    script_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/viya4_environment_restart.py"
+    script_path = os.path.realpath(__file__)
+    try:
+        response = requests.get(script_url, timeout=5)
+        response.raise_for_status()
+        latest_script = response.text
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(latest_script)
+        os.chmod(script_path, 0o755)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update script: {e}")
+        return False
 
 def print_step_header(step_num, step_name, icon):
     """Print formatted step header with index, name, and icon"""
@@ -344,6 +387,18 @@ def create_backup_logs(ns, ticket):
         sys.exit(1)
 
 def main():
+    # Check for updates
+    has_update, latest_version = check_for_updates()
+    if has_update:
+        logger.info(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
+        if update_script():
+            logger.info("Script updated successfully. Please restart the application.")
+            sys.exit(0)
+        else:
+            logger.error("Failed to update the script. Continuing with the current version.")
+    else:
+        logger.info(f"Script is up-to-date. Running version: {SCRIPT_VERSION}")
+
     if len(sys.argv) != 3:
         print("❌ Usage: ./viya4_environment_restart.py <ConfigurationItem> <TicketNumber>")
         sys.exit(1)
