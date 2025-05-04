@@ -11,13 +11,14 @@ import json
 import requests
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import shutil
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Version and GitHub settings
-SCRIPT_VERSION = "v1.5.0"
+SCRIPT_VERSION = "v1.5.1"
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -59,14 +60,36 @@ def print_step_header(step_num, step_name, icon):
     print(f"Step {step_num}: {icon} {step_name}")
     print(f"{'=' * 50}")
 
+def print_index_page():
+    """Print an index page with all steps and their descriptions"""
+    steps = [
+        (0, "Parse Configuration Item", "Parse the Configuration Item to extract namespace, AKS name, and region"),
+        (1, "Setup Zabbix Maintenance", "Create a Zabbix maintenance window for the specified duration"),
+        (2, "List Running Pods", "List all currently running pods in the namespace"),
+        (3, "Create Backup of Logs", "Backup logs for all running pods"),
+        (4, "Backup Consul Raft.db File", "Backup the Consul raft.db file for all consul server pods"),
+        (5, "Stop SAS Environment", "Stop the SAS environment by submitting a stop job"),
+        (6, "Deletion of Jobs", "Delete specified jobs matching predefined patterns"),
+        (7, "Start Viya Environment", "Start the SAS Viya environment by submitting a start job"),
+        (8, "Verifying Consul Server Pods", "Verify that all consul server pods are healthy"),
+        (9, "Monitoring Pods Post Restart", "Dynamically monitor pod statuses after restart")
+    ]
+    
+    print("\n" + "=" * 60)
+    print(f"{'SAS Viya 4 Environment Restart Automation - Index':^60}")
+    print("=" * 60)
+    print(f"{'Step':<8}{'Name':<30}{'Description':<50}")
+    print("-" * 60)
+    for step_num, step_name, description in steps:
+        print(f"{step_num:<8}{step_name:<30}{description:<50}")
+    print("=" * 60 + "\n")
+
 def countdown(seconds, message):
     """Display a countdown timer that updates in place"""
     for i in range(seconds, -1, -1):
-        # Use \r to return to start of line, pad with spaces to clear previous output
         print(f"\r{message}: {i}  ", end="", flush=True)
         sys.stdout.flush()
         time.sleep(1)
-    # Move to next line after countdown
     print()
 
 def parse_ci(ci):
@@ -229,7 +252,6 @@ def create_backup_logs(ns, ticket):
     """Step 3: Create Backup of Logs"""
     print_step_header(3, "Create Backup of Logs", "💾")
     
-    # Start timing
     start_time = time.time()
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -379,7 +401,6 @@ def create_backup_logs(ns, ticket):
         tar_cmd = ["tar", "-czf", tar_file, "-C", backup_dir, "."]
         subprocess.run(tar_cmd)
         
-        # Calculate and display time taken
         end_time = time.time()
         duration_seconds = end_time - start_time
         minutes = int(duration_seconds // 60)
@@ -400,14 +421,11 @@ def backup_consul_raft(ns, ticket):
     """Step 4: Backup Consul Raft.db File"""
     print_step_header(4, "Backup Consul Raft.db File", "💾")
     
-    # Start timing
     start_time = time.time()
     
-    # Source and destination paths
     source_file = "/consul/data/raft/raft.db"
     dest_file = f"/consul/data/raft/raft.db_{ticket}"
     
-    # Get Consul server pods
     cmd = ["kubectl", "get", "pods", "-n", ns, "-l", "app=sas-consul-server", "-o", "json"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -426,14 +444,12 @@ def backup_consul_raft(ns, ticket):
     
     def backup_raft_for_pod(pod_name):
         """Helper function to backup raft.db for a single pod"""
-        # Check if source file exists
         check_cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "test", "-f", source_file]
         try:
             subprocess.run(check_cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
             return (pod_name, False, f"Source file {source_file} does not exist in pod {pod_name}: {e.stderr}")
         
-        # Backup command
         backup_cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "cp", source_file, dest_file]
         try:
             result = subprocess.run(backup_cmd, capture_output=True, text=True, check=True)
@@ -442,7 +458,6 @@ def backup_consul_raft(ns, ticket):
         except subprocess.CalledProcessError as e:
             return (pod_name, False, f"Failed to backup {source_file} to {dest_file} in pod {pod_name}: {e.stderr}")
     
-    # Backup raft.db for all pods in parallel
     backup_results = []
     with ThreadPoolExecutor(max_workers=3) as executor:
         future_to_pod = {executor.submit(backup_raft_for_pod, pod): pod for pod in consul_pods}
@@ -451,7 +466,6 @@ def backup_consul_raft(ns, ticket):
             result = future.result()
             backup_results.append(result)
     
-    # Display results
     print(f"\n📋 Consul Raft.db Backup Summary:")
     print("=" * 18)
     for pod_name, success, error in sorted(backup_results, key=lambda x: x[0]):
@@ -460,13 +474,11 @@ def backup_consul_raft(ns, ticket):
         if error and not success:
             print(f"  Error: {error}")
     
-    # Check for failures
     failed_backups = [r for r in backup_results if not r[1]]
     if failed_backups:
         print(f"❌ Error: Failed to backup raft.db for {len(failed_backups)} pod(s). See errors above.")
         sys.exit(1)
     
-    # Calculate and display time taken
     end_time = time.time()
     duration_seconds = end_time - start_time
     minutes = int(duration_seconds // 60)
@@ -475,18 +487,11 @@ def backup_consul_raft(ns, ticket):
     print(f"⏱️ Time taken to backup raft.db files: {minutes} minutes, {seconds} seconds")
 
 def stop_sas_environment(ns, ticket):
-    """
-    Step 5: Stop SAS Environment
-    Submits a Kubernetes job to stop the SAS environment, monitors the job's pod,
-    displays initial and final pod state, ensures graceful termination, and forcefully
-    deletes stuck pods (except prometheus-pushgateway).
-    """
+    """Step 5: Stop SAS Environment"""
     print_step_header(5, "Stop SAS Environment", "🛑")
     
-    # Start timing
     start_time = time.time()
     
-    # Submit the stop job
     timestamp = str(int(time.time()))
     job_name = f"sas-stop-all-{timestamp}"
     cmd = ["kubectl", "create", "job", job_name, "--from", "cronjobs/sas-stop-all", "-n", ns]
@@ -497,10 +502,8 @@ def stop_sas_environment(ns, ticket):
         print(f"❌ Failed to submit stop job: {e.stderr}")
         sys.exit(1)
     
-    # Wait for pod creation
     countdown(10, "⏳ Waiting for stop job pod to be created")
     
-    # Find the pod created by the job
     cmd = ["kubectl", "get", "pods", "-n", ns, "-l", f"job-name={job_name}", "-o", "json"]
     max_attempts = 30
     attempt = 0
@@ -527,7 +530,6 @@ def stop_sas_environment(ns, ticket):
         print(f"❌ Error: Stop job pod not found after {max_attempts * 2} seconds")
         sys.exit(1)
     
-    # Wait for pod to complete
     print(f"\n⏳ Waiting for pod {pod_name} to complete")
     while True:
         try:
@@ -537,10 +539,9 @@ def stop_sas_environment(ns, ticket):
             pod_phase = pod_data["status"].get("phase")
             if pod_phase == "Succeeded":
                 print(f"✅ Stop job pod {pod_name} completed successfully")
-                # Show final pod state
                 cmd = ["kubectl", "get", "pod", "-n", ns, pod_name]
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                pod_status = result.stdout.strip().split('\n')[-1]  # Get last line (pod info)
+                pod_status = result.stdout.strip().split('\n')[-1]
                 print(f"📋 Final pod state: {pod_status}")
                 break
             elif pod_phase == "Failed":
@@ -551,10 +552,8 @@ def stop_sas_environment(ns, ticket):
             print(f"❌ Error checking pod status: {e}")
             sys.exit(1)
     
-    # Wait for graceful termination
     countdown(60, "⏳ Waiting for pods to terminate gracefully")
     
-    # Identify prometheus-pushgateway pods
     exclude_pods = set()
     try:
         cmd = ["kubectl", "get", "pods", "-n", ns, "-l", "app=prometheus-pushgateway", "-o", "json"]
@@ -566,7 +565,6 @@ def stop_sas_environment(ns, ticket):
     except subprocess.CalledProcessError as e:
         print(f"⚠️ Warning: Failed to list prometheus-pushgateway pods: {e.stderr}")
     
-    # Check for stuck pods and delete them
     cmd = ["kubectl", "get", "pods", "-n", ns, "-o", "json"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -575,7 +573,6 @@ def stop_sas_environment(ns, ticket):
         for pod in pods_data.get("items", []):
             pod_name = pod["metadata"]["name"]
             pod_phase = pod["status"].get("phase")
-            # Check for Running or pods stuck in Terminating (deletionTimestamp exists)
             if pod_name not in exclude_pods and (pod_phase == "Running" or pod.get("metadata", {}).get("deletionTimestamp")):
                 stuck_pods.append(pod_name)
         
@@ -594,11 +591,9 @@ def stop_sas_environment(ns, ticket):
         print(f"❌ Failed to check for stuck pods: {e}")
         sys.exit(1)
     
-    # List running pods
     print("\n📋 Listing pods after stop operation:")
     list_running_pods(ns)
     
-    # Calculate and display time taken
     end_time = time.time()
     duration_seconds = end_time - start_time
     minutes = int(duration_seconds // 60)
@@ -607,17 +602,11 @@ def stop_sas_environment(ns, ticket):
     print(f"⏱️ Time taken to stop SAS environment: {minutes} minutes, {seconds} seconds")
 
 def delete_jobs(ns, ticket):
-    """
-    Step 6: Deletion of Jobs
-    Deletes Kubernetes jobs with names containing sas-backup-purge-job,
-    sas-update-checker, sas-import-data-loader, or sas-deployment-operator-autoupdate.
-    """
+    """Step 6: Deletion of Jobs"""
     print_step_header(6, "Deletion of Jobs", "🗑️")
     
-    # Start timing
     start_time = time.time()
     
-    # Job patterns to delete
     job_patterns = [
         "sas-backup-purge-job",
         "sas-update-checker",
@@ -625,7 +614,6 @@ def delete_jobs(ns, ticket):
         "sas-deployment-operator-autoupdate"
     ]
     
-    # Get all jobs in the namespace
     cmd = ["kubectl", "get", "jobs", "-n", ns, "-o", "json"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -652,7 +640,6 @@ def delete_jobs(ns, ticket):
         print(f"❌ Failed to list jobs: {e}")
         sys.exit(1)
     
-    # Calculate and display time taken
     end_time = time.time()
     duration_seconds = end_time - start_time
     minutes = int(duration_seconds // 60)
@@ -661,17 +648,11 @@ def delete_jobs(ns, ticket):
     print(f"⏱️ Time taken to delete jobs: {minutes} minutes, {seconds} seconds")
 
 def start_viya_environment(ns, ticket):
-    """
-    Step 7: Start Viya Environment
-    Submits a Kubernetes job to start the SAS Viya environment, monitors the job's pod,
-    displays initial and final pod state, and waits for pods to start.
-    """
+    """Step 7: Start Viya Environment"""
     print_step_header(7, "Start Viya Environment", "🚀")
     
-    # Start timing
     start_time = time.time()
     
-    # Submit the start job
     timestamp = str(int(time.time()))
     job_name = f"sas-start-all-{timestamp}"
     cmd = ["kubectl", "create", "job", job_name, "--from", "cronjobs/sas-start-all", "-n", ns]
@@ -682,10 +663,8 @@ def start_viya_environment(ns, ticket):
         print(f"❌ Failed to submit start job: {e.stderr}")
         sys.exit(1)
     
-    # Wait for pod creation
     countdown(10, "⏳ Waiting for start job pod to be created")
     
-    # Find the pod created by the job
     cmd = ["kubectl", "get", "pods", "-n", ns, "-l", f"job-name={job_name}", "-o", "json"]
     max_attempts = 30
     attempt = 0
@@ -712,7 +691,6 @@ def start_viya_environment(ns, ticket):
         print(f"❌ Error: Start job pod not found after {max_attempts * 2} seconds")
         sys.exit(1)
     
-    # Wait for pod to complete
     print(f"\n⏳ Waiting for pod {pod_name} to complete")
     while True:
         try:
@@ -722,10 +700,9 @@ def start_viya_environment(ns, ticket):
             pod_phase = pod_data["status"].get("phase")
             if pod_phase == "Succeeded":
                 print(f"✅ Start job pod {pod_name} completed successfully")
-                # Show final pod state
                 cmd = ["kubectl", "get", "pod", "-n", ns, pod_name]
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                pod_status = result.stdout.strip().split('\n')[-1]  # Get last line (pod info)
+                pod_status = result.stdout.strip().split('\n')[-1]
                 print(f"📋 Final pod state: {pod_status}")
                 break
             elif pod_phase == "Failed":
@@ -736,14 +713,11 @@ def start_viya_environment(ns, ticket):
             print(f"❌ Error checking pod status: {e}")
             sys.exit(1)
     
-    # Wait for pods to start
     countdown(60, "⏳ Waiting for pods to start")
     
-    # List running pods
     print("\n📋 Listing pods after start operation:")
     list_running_pods(ns)
     
-    # Calculate and display time taken
     end_time = time.time()
     duration_seconds = end_time - start_time
     minutes = int(duration_seconds // 60)
@@ -752,15 +726,9 @@ def start_viya_environment(ns, ticket):
     print(f"⏱️ Time taken to start SAS Viya environment: {minutes} minutes, {seconds} seconds")
 
 def verify_consul_pods(ns, ticket):
-    """
-    Step 8: Verifying Consul Server Pod
-    Checks the health of sas-consul-server pods. If not all pods are 1/1 Running,
-    scales down the statefulset, deletes raft.db from each PVC, and scales back up.
-    Retries once if pods remain unhealthy.
-    """
-    print_step_header(8, "Verifying Consul Server Pod", "🔍")
+    """Step 8: Verifying Consul Server Pods"""
+    print_step_header(8, "Verifying Consul Server Pods", "🔍")
     
-    # Start timing
     start_time = time.time()
     
     def check_consul_health():
@@ -771,7 +739,7 @@ def verify_consul_pods(ns, ticket):
             pods_data = json.loads(result.stdout)
             consul_pods = pods_data.get("items", [])
             if not consul_pods:
-                print(f"❌ Error: No sas-consul-server pods found in namespace {ns}")
+                print(f"⚠️ Warning: No sas-consul-server pods found in namespace {ns}. Continuing.")
                 return False, []
             
             print("\n📋 Consul server pod status:")
@@ -779,16 +747,25 @@ def verify_consul_pods(ns, ticket):
             pod_statuses = []
             for pod in consul_pods:
                 pod_name = pod["metadata"]["name"]
-                ready = pod["status"].get("ready", "0/0")
-                status = pod["status"].get("phase", "Unknown")
-                for container in pod["status"].get("containerStatuses", []):
-                    state = container.get("state", {})
+                phase = pod["status"].get("phase", "Unknown")
+                container_statuses = pod["status"].get("containerStatuses", [])
+                
+                total_containers = len(container_statuses)
+                ready_containers = sum(1 for cs in container_statuses if cs.get("ready", False))
+                ready_status = f"{ready_containers}/{total_containers}"
+                
+                status = phase
+                for cs in container_statuses:
+                    state = cs.get("state", {})
                     if "waiting" in state and state["waiting"].get("reason") == "CrashLoopBackOff":
                         status = "CrashLoopBackOff"
+                        break
                     elif "terminated" in state and state["terminated"].get("exitCode", 0) != 0:
                         status = "Error"
-                pod_statuses.append((pod_name, ready, status))
-                if ready != "1/1" or status != "Running":
+                        break
+                
+                pod_statuses.append((pod_name, ready_status, status))
+                if ready_status != f"{total_containers}/{total_containers}" or status not in ["Running"]:
                     all_healthy = False
             
             for pod_name, ready, status in sorted(pod_statuses, key=lambda x: x[0]):
@@ -797,25 +774,23 @@ def verify_consul_pods(ns, ticket):
             
             return all_healthy, consul_pods
         except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-            print(f"❌ Failed to check consul pod status: {e}")
-            sys.exit(1)
-    
+            print(f"❌ Failed to check consul pod status: {e}. Continuing.")
+            logger.error(f"Failed to check consul pod status: {e}")
+            return False, []
+
     def remediate_consul():
         """Scale down consul, delete raft.db from PVCs, and scale up"""
-        # Step 1: Scale down consul
         print("\n📉 Scaling down sas-consul-server to 0 replicas")
         cmd = ["kubectl", "-n", ns, "scale", "sts/sas-consul-server", "--replicas=0"]
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
             print("✅ Scaled down sas-consul-server")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to scale down sas-consul-server: {e.stderr}")
-            sys.exit(1)
-        
-        # Wait for termination
+            print(f"❌ Failed to scale down sas-consul-server: {e.stderr}. Continuing.")
+            logger.error(f"Failed to scale down sas-consul-server: {e.stderr}")
+
         countdown(10, "⏳ Waiting for consul pods to terminate")
         
-        # Check for lingering pods and forcefully delete
         cmd = ["kubectl", "get", "pods", "-n", ns, "-l", "app=sas-consul-server", "-o", "json"]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -829,23 +804,23 @@ def verify_consul_pods(ns, ticket):
                         subprocess.run(cmd, capture_output=True, text=True, check=True)
                         print(f"✅ Forcefully deleted pod: {pod_name}")
                     except subprocess.CalledProcessError as e:
-                        print(f"❌ Failed to delete pod {pod_name}: {e.stderr}")
+                        print(f"❌ Failed to delete pod {pod_name}: {e.stderr}. Continuing.")
+                        logger.error(f"Failed to delete pod {pod_name}: {e.stderr}")
             else:
                 print("✅ No lingering consul pods found")
         except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-            print(f"❌ Failed to check for lingering pods: {e}")
-            sys.exit(1)
+            print(f"❌ Failed to check for lingering pods: {e}. Continuing.")
+            logger.error(f"Failed to check for lingering pods: {e}")
         
-        # Step 2: Delete raft.db from each PVC
         pvc_names = [
             "sas-viya-consul-data-volume-sas-consul-server-0",
             "sas-viya-consul-data-volume-sas-consul-server-1",
             "sas-viya-consul-data-volume-sas-consul-server-2"
         ]
         
+        pvc_errors = []
         for pvc_name in pvc_names:
             print(f"\n📀 Processing PVC: {pvc_name}")
-            # Create temporary pod manifest
             pod_name = f"temp-consul-pvc-{pvc_name.split('-')[-1]}-{int(time.time())}"
             pod_manifest = {
                 "apiVersion": "v1",
@@ -871,21 +846,21 @@ def verify_consul_pods(ns, ticket):
                 }
             }
             
-            # Write manifest to temporary file
             manifest_file = f"/tmp/{pod_name}.yaml"
             with open(manifest_file, "w") as f:
                 json.dump(pod_manifest, f)
             
-            # Create pod
             cmd = ["kubectl", "apply", "-f", manifest_file, "-n", ns]
             try:
                 subprocess.run(cmd, capture_output=True, text=True, check=True)
                 print(f"✅ Created temporary pod: {pod_name}")
             except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to create pod for PVC {pvc_name}: {e.stderr}")
-                sys.exit(1)
+                print(f"❌ Failed to create pod for PVC {pvc_name}: {e.stderr}. Continuing.")
+                logger.error(f"Failed to create pod for PVC {pvc_name}: {e.stderr}")
+                pvc_errors.append(f"Failed to create pod for PVC {pvc_name}: {e.stderr}")
+                os.remove(manifest_file)
+                continue
             
-            # Wait for pod to be Running
             max_attempts = 30
             attempt = 0
             while attempt < max_attempts:
@@ -903,46 +878,69 @@ def verify_consul_pods(ns, ticket):
                     attempt += 1
             
             if attempt >= max_attempts:
-                print(f"❌ Error: Pod {pod_name} did not reach Running state")
-                sys.exit(1)
+                print(f"❌ Error: Pod {pod_name} did not reach Running state. Continuing.")
+                logger.error(f"Pod {pod_name} did not reach Running state")
+                pvc_errors.append(f"Pod {pod_name} did not reach Running state")
+                cmd = ["kubectl", "delete", "pod", "-n", ns, pod_name, "--force", "--grace-period=0"]
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    print(f"✅ Deleted temporary pod: {pod_name}")
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to delete pod {pod_name}: {e.stderr}. Continuing.")
+                    logger.error(f"Failed to delete pod {pod_name}: {e.stderr}")
+                os.remove(manifest_file)
+                continue
             
-            # Delete raft.db
             cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "rm", "-f", "/consul/data/raft/raft.db"]
-            try:
-                subprocess.run(cmd, capture_output=True, text=True, check=True)
-                print(f"✅ Deleted raft.db from PVC {pvc_name}")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to delete raft.db from PVC {pvc_name}: {e.stderr}")
-                sys.exit(1)
+            max_retries = 3
+            retry_attempt = 0
+            while retry_attempt < max_retries:
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=True)
+                    print(f"✅ Deleted raft.db from PVC {pvc_name}")
+                    break
+                except subprocess.CalledProcessError as e:
+                    retry_attempt += 1
+                    if retry_attempt < max_retries:
+                        print(f"❌ Failed to delete raft.db from PVC {pvc_name} (Attempt {retry_attempt}/{max_retries}): {e.stderr}. Retrying in 5 seconds.")
+                        logger.error(f"Failed to delete raft.db from PVC {pvc_name} (Attempt {retry_attempt}/{max_retries}): {e.stderr}")
+                        time.sleep(5)
+                    else:
+                        print(f"❌ Failed to delete raft.db from PVC {pvc_name} after {max_retries} attempts: {e.stderr}. Continuing.")
+                        logger.error(f"Failed to delete raft.db from PVC {pvc_name} after {max_retries} attempts: {e.stderr}")
+                        pvc_errors.append(f"Failed to delete raft.db from PVC {pvc_name}: {e.stderr}")
             
-            # Delete temporary pod
             cmd = ["kubectl", "delete", "pod", "-n", ns, pod_name, "--force", "--grace-period=0"]
             try:
                 subprocess.run(cmd, capture_output=True, text=True, check=True)
                 print(f"✅ Deleted temporary pod: {pod_name}")
             except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to delete pod {pod_name}: {e.stderr}")
-                sys.exit(1)
+                print(f"❌ Failed to delete pod {pod_name}: {e.stderr}. Continuing.")
+                logger.error(f"Failed to delete pod {pod_name}: {e.stderr}")
+                pvc_errors.append(f"Failed to delete pod {pod_name}: {e.stderr}")
             
-            # Clean up manifest file
             os.remove(manifest_file)
         
-        # Step 3: Scale up consul
         print("\n📈 Scaling up sas-consul-server to 3 replicas")
         cmd = ["kubectl", "-n", ns, "scale", "sts/sas-consul-server", "--replicas=3"]
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
             print("✅ Scaled up sas-consul-server")
         except subprocess.CalledProcessError as e:
-            print(f"❌ Failed to scale up sas-consul-server: {e.stderr}")
-            sys.exit(1)
+            print(f"❌ Failed to scale up sas-consul-server: {e.stderr}. Continuing.")
+            logger.error(f"Failed to scale up sas-consul-server: {e.stderr}")
+            pvc_errors.append(f"Failed to scale up sas-consul-server: {e.stderr}")
         
-        # Wait for pods to come up
         countdown(120, "⏳ Waiting for consul pods to start")
+        
+        if pvc_errors:
+            print(f"\n⚠️ Encountered {len(pvc_errors)} errors during PVC remediation:")
+            for error in pvc_errors:
+                print(f"- {error}")
     
-    # Main verification loop (with retry)
     max_retries = 1
     attempt = 0
+    all_healthy = False
     while attempt <= max_retries:
         all_healthy, consul_pods = check_consul_health()
         if all_healthy:
@@ -956,19 +954,141 @@ def verify_consul_pods(ns, ticket):
                 print("\n🔄 Retrying consul health check after remediation")
     
     if not all_healthy:
-        print("\n❌ Error: Consul pods are still not healthy after remediation attempts")
-        sys.exit(1)
+        print("\n⚠️ Warning: Consul pods are still not healthy after remediation attempts. Continuing to next step.")
+        logger.warning("Consul pods are not healthy after remediation attempts")
     
-    # Calculate and display time taken
     end_time = time.time()
     duration_seconds = end_time - start_time
     minutes = int(duration_seconds // 60)
     seconds = int(duration_seconds % 60)
-    print(f"\n✅ Consul server pod verification completed")
+    print(f"\n✅ Consul server pod verification completed (with possible errors)")
     print(f"⏱️ Time taken to verify consul pods: {minutes} minutes, {seconds} seconds")
 
+def monitor_pods_post_restart(ns, ticket):
+    """Step 9: Dynamically monitor pod statuses with a single table updated in place"""
+    print_step_header(9, "Monitoring Pods Post Restart", "📊")
+    
+    start_time = time.time()
+    iteration = 0
+    table_lines = 8  # Header, subtitle, timestamp, instruction, separator, headers, data, separator
+    
+    # Check if terminal supports ANSI escape codes
+    use_ansi = os.environ.get("TERM", "") != "dumb" and sys.stdout.isatty()
+    if not use_ansi:
+        print("⚠️ Warning: Terminal does not support ANSI escape codes. Appending tables instead of updating in place.")
+        logger.warning("Terminal does not support ANSI escape codes")
+    
+    try:
+        while True:
+            iteration += 1
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                cmd = ["kubectl", "get", "pods", "-n", ns, "-o", "json"]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                pods_data = json.loads(result.stdout)
+                pods = pods_data.get("items", [])
+                
+                total_pods = len(pods)
+                running = 0
+                crashloop = 0
+                error = 0
+                completed = 0
+                
+                for pod in pods:
+                    pod_name = pod["metadata"]["name"]
+                    phase = pod["status"].get("phase", "Unknown")
+                    container_statuses = pod["status"].get("containerStatuses", [])
+                    
+                    if phase == "Succeeded":
+                        completed += 1
+                        continue
+                    
+                    total_containers = len(container_statuses)
+                    ready_containers = sum(1 for cs in container_statuses if cs.get("ready", False))
+                    ready_status = f"{ready_containers}/{total_containers}"
+                    
+                    has_crashloop = False
+                    has_error = False
+                    for cs in container_statuses:
+                        state = cs.get("state", {})
+                        if "waiting" in state and state["waiting"].get("reason") == "CrashLoopBackOff":
+                            has_crashloop = True
+                            break
+                        elif "terminated" in state and state["terminated"].get("exitCode", 0) != 0:
+                            has_error = True
+                            break
+                    
+                    if has_crashloop:
+                        crashloop += 1
+                    elif has_error:
+                        error += 1
+                    elif phase == "Running" and ready_status == f"{total_containers}/{total_containers}":
+                        running += 1
+                    else:
+                        error += 1  # Treat other non-terminal states as errors for simplicity
+                
+                # Get terminal width (default to 80 if unavailable)
+                terminal_width = min(shutil.get_terminal_size().columns, 80)
+                separator = "-" * terminal_width
+                
+                # Build table lines with fixed-width columns
+                table = [
+                    f"{'=' * terminal_width}",
+                    f"Step 9: 📊 Monitoring Pods Post Restart (Namespace: {ns}, Ticket: {ticket})",
+                    f"{'=' * terminal_width}",
+                    f"Timestamp: {timestamp} | Iteration: {iteration}",
+                    f"Press Ctrl+C to stop monitoring",
+                    separator,
+                    f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
+                    separator,
+                    f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
+                    separator
+                ]
+                
+                # Ensure table has exactly table_lines lines (pad with empty lines if needed)
+                while len(table) < table_lines:
+                    table.append("")
+                
+                # Print table
+                if use_ansi and iteration > 1:
+                    # Move cursor up to overwrite previous table
+                    print(f"\033[{table_lines}A", end="")
+                
+                for line in table[:table_lines]:
+                    # Clear current line and print new line
+                    print(f"\r{line:<{terminal_width}}", end="\n")
+                    sys.stdout.flush()
+                
+                # Check if all pods are in terminal states (optional auto-exit)
+                if running + completed == total_pods and crashloop == 0 and error == 0:
+                    print("\n✅ All pods are in Running or Completed states. Exiting monitoring.")
+                    break
+                
+                # Sleep before next update
+                time.sleep(5)
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to fetch pod statuses: {e.stderr}")
+                print(f"\n❌ Error fetching pod statuses at {timestamp}: {e.stderr}")
+                time.sleep(5)
+                continue
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse pod JSON data: {e}")
+                print(f"\n❌ Error parsing pod data at {timestamp}: {e}")
+                time.sleep(5)
+                continue
+            
+    except KeyboardInterrupt:
+        print("\n✅ Monitoring stopped by user.")
+    
+    end_time = time.time()
+    duration_seconds = end_time - start_time
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    print(f"\n✅ Pod monitoring completed")
+    print(f"⏱️ Time taken to monitor pods: {minutes} minutes, {seconds} seconds")
+
 def main():
-    # Check for updates
     has_update, latest_version = check_for_updates()
     if has_update:
         logger.info(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
@@ -987,6 +1107,7 @@ def main():
             print("Skipping update. Proceeding with current version.")
     else:
         logger.info(f"Script is up-to-date. Running version: {SCRIPT_VERSION}")
+        print(f"Script is up-to-date. Running version: {SCRIPT_VERSION}")
 
     if len(sys.argv) != 3:
         print("❌ Usage: ./viya4_environment_restart.py <ConfigurationItem> <TicketNumber>")
@@ -998,6 +1119,9 @@ def main():
     print(f"\n🚀 Starting SAS Viya 4 Environment Restart Automation")
     print(f"Configuration Item: {ci}")
     print(f"Ticket Number: {ticket}\n")
+    
+    # Print index page
+    print_index_page()
     
     env_vars = parse_ci(ci)
     for key, value in env_vars.items():
@@ -1019,6 +1143,8 @@ def main():
     start_viya_environment(env_vars['NS'], ticket)
     
     verify_consul_pods(env_vars['NS'], ticket)
+    
+    monitor_pods_post_restart(env_vars['NS'], ticket)
     
     print(f"\n🎉 Automation completed successfully!")
 
