@@ -750,6 +750,7 @@ def verify_consul_pods(ns, ticket):
     
     start_time = time.time()
     initial_statuses = []  # Store initial pod statuses for comparison
+    remediation_performed = False  # Track if remediation was needed
     
     def check_consul_health():
         """Check if all sas-consul-server pods are 1/1 Running"""
@@ -989,8 +990,8 @@ def verify_consul_pods(ns, ticket):
             initial_statuses = current_statuses  # Store initial statuses
         if all_healthy:
             print("\n✅ All sas-consul-server pods are healthy (1/1 Running)")
-            # Print pre- and post-PVC status comparison
-            if initial_statuses and current_statuses:
+            # Print comparison table only if remediation was performed
+            if remediation_performed and initial_statuses and current_statuses:
                 print("\n📊 Consul Pod Status Comparison (Pre- and Post-PVC Operations):")
                 terminal_width = min(shutil.get_terminal_size().columns, 80)
                 separator = "-" * terminal_width
@@ -1010,6 +1011,7 @@ def verify_consul_pods(ns, ticket):
             break
         else:
             print(f"\n⚠️ Consul pods are not healthy (Attempt {attempt + 1}/{max_retries + 1})")
+            remediation_performed = True  # Mark that remediation was attempted
             remediate_consul(initial_statuses)
             attempt += 1
             if attempt <= max_retries:
@@ -1026,74 +1028,66 @@ def verify_consul_pods(ns, ticket):
     print(f"\n✅ Consul server pod verification completed (with possible errors)")
     print(f"⏱️ Time taken to verify consul pods: {minutes} minutes, {seconds} seconds")
 
-# Set up logging with file output for DEBUG and console output for INFO
-log_file = f"/tmp/pod_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
-# Configure root logger to WARNING to prevent interference
-logging.getLogger('').setLevel(logging.WARNING)
-logging.getLogger('').handlers.clear()
-
-# Create named logger for the script
-logger = logging.getLogger('pod_monitor')
-logger.setLevel(logging.DEBUG)  # Capture all levels
-logger.handlers.clear()  # Clear any existing handlers
-
-# File handler for DEBUG and above
-file_handler = logging.FileHandler(log_file)
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
-
-# Console handler for INFO and above
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(console_handler)
-
-def monitor_pods_post_restart(ns, ticket):
-    """Monitor pod statuses with a single table updated in place using ANSI codes"""
-    # Simulate prior output (mimicking Steps 0–8)
-    prior_output = [
-        "Simulated prior output (Steps 0–8):",
-        "✅ Step 1: Configuration loaded",
-        "✅ Step 2: Zabbix setup completed",
-        "✅ Step 3: Pods stopped",
-        "✅ Step 4: Pods deleted",
-        "✅ Step 5: Environment started",
-        "✅ Step 6: Consul pods verified",
-        "⏱️ Time taken for prior steps: 5 minutes, 30 seconds"
-    ]
-    for line in prior_output:
-        print(line)
+def monitor_pods(namespace, ticket):
+    """Step 9: Monitor pod statuses with a single table updated in place using ANSI codes.
     
+    Args:
+        namespace (str): Kubernetes namespace to monitor.
+        ticket (str): Ticket number for tracking (e.g., 'NSE-123').
+    """
+    print_step_header(9, "Monitoring Pods Post Restart", "📊")
+    
+    # Set up logging with file output for DEBUG and console output for INFO
+    log_file = f"/tmp/pod_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    # Configure root logger to WARNING to prevent interference
+    logging.getLogger('').setLevel(logging.WARNING)
+    logging.getLogger('').handlers.clear()
+
+    # Create named logger for the script
+    logger = logging.getLogger('pod_monitor')
+    logger.setLevel(logging.DEBUG)  # Capture all levels
+    logger.handlers.clear()  # Clear any existing handlers
+
+    # File handler for DEBUG and above
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(file_handler)
+
+    # Console handler for WARNING and above to suppress INFO logs
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.WARNING)  # Only show WARNING and above in console
+    console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(console_handler)
+
     start_time = time.time()
     iteration = 0
     table_lines = 10  # Header, subtitle, separator, timestamp, instruction, separator, headers, data, separator, empty line
-    prior_lines = len(prior_output) + 2  # Prior output + separator + 1 newline
     
-    # Log terminal and environment details
+    # Log terminal and environment details (to file only)
     term_type = os.environ.get("TERM", "unknown")
     in_tmux = os.environ.get("TMUX", "no") != "no"
     in_screen = os.environ.get("STY", "no") != "no"
     is_tty = sys.stdout.isatty()
-    logger.info(f"Terminal type: {term_type}, TMUX: {in_tmux}, SCREEN: {in_screen}, TTY: {is_tty}")
+    logger.debug(f"Terminal type: {term_type}, TMUX: {in_tmux}, SCREEN: {in_screen}, TTY: {is_tty}")
     
     # Check if appending is forced or ANSI is unsupported
     force_append = os.environ.get("FORCE_APPEND", "0") == "1"
     use_ansi = not force_append and term_type != "dumb" and is_tty
     
-    # Print separator with minimal padding
+    # Print separator with minimal padding to separate from prior script output
     terminal_width = min(shutil.get_terminal_size().columns, 80)
-    print(f"\n{'=' * terminal_width}")  # Single newline before separator
+    print(f"\n{'=' * terminal_width}")
     
     try:
         while True:
             iteration += 1
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            total_pods = running = crashloop = error = completed = 0
+            total_pods = running = pending = crashloop = error = completed = 0
             
             try:
-                cmd = ["kubectl", "get", "pods", "-n", ns, "-o", "json"]
+                cmd = ["kubectl", "get", "pods", "-n", namespace, "-o", "json"]
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
                 pod_data = json.loads(result.stdout)
                 pods = pod_data.get("items", [])
@@ -1103,7 +1097,10 @@ def monitor_pods_post_restart(ns, ticket):
                     phase = pod["status"].get("phase", "Unknown")
                     container_statuses = pod["status"].get("containerStatuses", [])
                     
-                    if phase == "Succeeded":
+                    if phase == "Pending":
+                        pending += 1
+                        continue
+                    elif phase == "Succeeded":
                         completed += 1
                         continue
                     
@@ -1131,33 +1128,33 @@ def monitor_pods_post_restart(ns, ticket):
                     else:
                         error += 1
                 
-                logger.debug(f"Iteration {iteration}: Total={total_pods}, Running={running}, CrashLoopBackOff={crashloop}, Error={error}, Completed={completed}")
+                logger.debug(f"Iteration {iteration}: Total={total_pods}, Running={running}, Pending={pending}, CrashLoopBackOff={crashloop}, Error={error}, Completed={completed}")
                 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to fetch pod statuses: {e.stderr}")
                 print(f"❌ Error fetching pod statuses at {timestamp}: {e.stderr}")
-                total_pods = running = crashloop = error = completed = 0
+                total_pods = running = pending = crashloop = error = completed = 0
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse pod JSON data: {e}")
                 print(f"❌ Error parsing pod data at {timestamp}: {e}")
-                total_pods = running = crashloop = error = completed = 0
+                total_pods = running = pending = crashloop = error = completed = 0
             except subprocess.TimeoutExpired as e:
                 logger.error(f"kubectl command timed out: {e}")
                 print(f"❌ kubectl command timed out at {timestamp}")
-                total_pods = running = crashloop = error = completed = 0
+                total_pods = running = pending = crashloop = error = completed = 0
             
-            # Build table
+            # Build table with Pending column
             separator = "-" * terminal_width
             table = [
                 f"{'=' * terminal_width}",
-                f"Pod Monitoring (Namespace: {ns}, Ticket: {ticket})",
+                f"Pod Monitoring (Namespace: {namespace}, Ticket: {ticket})",
                 f"{'=' * terminal_width}",
                 f"Timestamp: {timestamp} | Iteration: {iteration}",
                 f"Press Ctrl+C to stop monitoring",
                 separator,
-                f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
+                f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'Pending':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
                 separator,
-                f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
+                f"{iteration:<10}{total_pods:<12}{running:<10}{pending:<10}{crashloop:<18}{error:<10}{completed:<10}",
                 separator
             ]
             
@@ -1194,9 +1191,9 @@ def monitor_pods_post_restart(ns, ticket):
                         logger.error(f"Terminal write error: {e}")
                         print(f"❌ Terminal write error: {e}")
             
-            # Check if all pods are in terminal states
-            if total_pods > 0 and running + completed == total_pods and crashloop == 0 and error == 0:
-                print("\n✅ All pods are in Running or Completed states. Exiting monitoring.")
+            # Exit if no Pending pods
+            if pending == 0:
+                print("\n✅ No Pending pods remaining. Exiting monitoring.")
                 break
             
             time.sleep(5)
@@ -1205,14 +1202,14 @@ def monitor_pods_post_restart(ns, ticket):
         separator = "-" * terminal_width
         table = [
             f"{'=' * terminal_width}",
-            f"Pod Monitoring (Namespace: {ns}, Ticket: {ticket})",
+            f"Pod Monitoring (Namespace: {namespace}, Ticket: {ticket})",
             f"{'=' * terminal_width}",
             f"Timestamp: {timestamp} | Iteration: {iteration}",
             f"Monitoring stopped by user",
             separator,
-            f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
+            f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'Pending':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
             separator,
-            f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
+            f"{iteration:<10}{total_pods:<12}{running:<10}{pending:<10}{crashloop:<18}{error:<10}{completed:<10}",
             separator
         ]
         print("\n")
@@ -1226,7 +1223,6 @@ def monitor_pods_post_restart(ns, ticket):
     seconds = int(duration_seconds % 60)
     print(f"\n✅ Pod monitoring completed")
     print(f"⏱️ Time taken to monitor pods: {minutes} minutes, {seconds} seconds")
-
 
 def main():
     has_update, latest_version = check_for_updates()
@@ -1285,7 +1281,7 @@ def main():
     
     verify_consul_pods(env_vars['NS'], ticket)
     
-    monitor_pods_post_restart(env_vars['NS'], ticket)
+    monitor_pods(env_vars['NS'], ticket)
     
     print(f"\n🎉 Automation completed successfully!")
 
