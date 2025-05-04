@@ -13,9 +13,28 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging with file output for DEBUG and console output for INFO
+log_file = f"/tmp/viya4_restart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),  # Write all logs to file
+        logging.StreamHandler(sys.stdout)  # Console output
+    ]
+)
+
+# Create a console handler with INFO level to suppress DEBUG in terminal
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Replace default StreamHandler with the new one
 logger = logging.getLogger(__name__)
+for handler in logger.handlers[:]:  # Copy to avoid modifying while iterating
+    if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+        logger.removeHandler(handler)
+logger.addHandler(console_handler)
 
 # Version and GitHub settings
 SCRIPT_VERSION = "v1.5.1"
@@ -730,6 +749,7 @@ def verify_consul_pods(ns, ticket):
     print_step_header(8, "Verifying Consul Server Pods", "🔍")
     
     start_time = time.time()
+    initial_statuses = []  # Store initial pod statuses for comparison
     
     def check_consul_health():
         """Check if all sas-consul-server pods are 1/1 Running"""
@@ -772,13 +792,13 @@ def verify_consul_pods(ns, ticket):
                 status_icon = "✅" if ready == "1/1" and status == "Running" else "❌"
                 print(f"- {pod_name}: {ready} {status} {status_icon}")
             
-            return all_healthy, consul_pods
+            return all_healthy, pod_statuses
         except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
             print(f"❌ Failed to check consul pod status: {e}. Continuing.")
             logger.error(f"Failed to check consul pod status: {e}")
             return False, []
 
-    def remediate_consul():
+    def remediate_consul(initial_statuses):
         """Scale down consul, delete raft.db from PVCs, and scale up"""
         print("\n📉 Scaling down sas-consul-server to 0 replicas")
         cmd = ["kubectl", "-n", ns, "scale", "sts/sas-consul-server", "--replicas=0"]
@@ -891,6 +911,17 @@ def verify_consul_pods(ns, ticket):
                 os.remove(manifest_file)
                 continue
             
+            # List raft.db before deletion
+            print(f"\n📋 Listing raft.db before deletion in PVC {pvc_name}")
+            cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "ls", "-l", "/consul/data/raft/raft.db"]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                print(f"📄 {result.stdout.strip()}")
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ Warning: Could not list raft.db: {e.stderr}. Continuing.")
+                logger.warning(f"Could not list raft.db in PVC {pvc_name}: {e.stderr}")
+            
+            # Delete raft.db
             cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "rm", "-f", "/consul/data/raft/raft.db"]
             max_retries = 3
             retry_attempt = 0
@@ -910,6 +941,17 @@ def verify_consul_pods(ns, ticket):
                         logger.error(f"Failed to delete raft.db from PVC {pvc_name} after {max_retries} attempts: {e.stderr}")
                         pvc_errors.append(f"Failed to delete raft.db from PVC {pvc_name}: {e.stderr}")
             
+            # List directory after deletion
+            print(f"\n📋 Listing /consul/data/raft/ after deletion in PVC {pvc_name}")
+            cmd = ["kubectl", "exec", "-n", ns, pod_name, "--", "ls", "-l", "/consul/data/raft/"]
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                print(f"📄 {result.stdout.strip() or 'Directory is empty'}")
+            except subprocess.CalledProcessError as e:
+                print(f"⚠️ Warning: Could not list directory: {e.stderr}. Continuing.")
+                logger.warning(f"Could not list directory in PVC {pvc_name}: {e.stderr}")
+            
+            # Delete temporary pod
             cmd = ["kubectl", "delete", "pod", "-n", ns, pod_name, "--force", "--grace-period=0"]
             try:
                 subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -942,13 +984,33 @@ def verify_consul_pods(ns, ticket):
     attempt = 0
     all_healthy = False
     while attempt <= max_retries:
-        all_healthy, consul_pods = check_consul_health()
+        all_healthy, current_statuses = check_consul_health()
+        if attempt == 0:
+            initial_statuses = current_statuses  # Store initial statuses
         if all_healthy:
             print("\n✅ All sas-consul-server pods are healthy (1/1 Running)")
+            # Print pre- and post-PVC status comparison
+            if initial_statuses and current_statuses:
+                print("\n📊 Consul Pod Status Comparison (Pre- and Post-PVC Operations):")
+                terminal_width = min(shutil.get_terminal_size().columns, 80)
+                separator = "-" * terminal_width
+                print(separator)
+                print(f"{'Pod Name':<25}{'Pre-PVC Ready':<15}{'Pre-PVC Status':<20}{'Post-PVC Ready':<15}{'Post-PVC Status':<20}")
+                print(separator)
+                # Merge statuses by pod name
+                for curr in sorted(current_statuses, key=lambda x: x[0]):
+                    pod_name, post_ready, post_status = curr
+                    pre_ready = pre_status = "N/A"
+                    for init in initial_statuses:
+                        if init[0] == pod_name:
+                            pre_ready, pre_status = init[1], init[2]
+                            break
+                    print(f"{pod_name:<25}{pre_ready:<15}{pre_status:<20}{post_ready:<15}{post_status:<20}")
+                print(separator)
             break
         else:
             print(f"\n⚠️ Consul pods are not healthy (Attempt {attempt + 1}/{max_retries + 1})")
-            remediate_consul()
+            remediate_consul(initial_statuses)
             attempt += 1
             if attempt <= max_retries:
                 print("\n🔄 Retrying consul health check after remediation")
@@ -964,38 +1026,80 @@ def verify_consul_pods(ns, ticket):
     print(f"\n✅ Consul server pod verification completed (with possible errors)")
     print(f"⏱️ Time taken to verify consul pods: {minutes} minutes, {seconds} seconds")
 
+# Set up logging with file output for DEBUG and console output for INFO
+log_file = f"/tmp/pod_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+# Configure root logger to WARNING to prevent interference
+logging.getLogger('').setLevel(logging.WARNING)
+logging.getLogger('').handlers.clear()
+
+# Create named logger for the script
+logger = logging.getLogger('pod_monitor')
+logger.setLevel(logging.DEBUG)  # Capture all levels
+logger.handlers.clear()  # Clear any existing handlers
+
+# File handler for DEBUG and above
+file_handler = logging.FileHandler(log_file)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Console handler for INFO and above
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(console_handler)
+
 def monitor_pods_post_restart(ns, ticket):
-    """Step 9: Dynamically monitor pod statuses with a single table updated in place"""
-    print_step_header(9, "Monitoring Pods Post Restart", "📊")
+    """Monitor pod statuses with a single table updated in place using ANSI codes"""
+    # Simulate prior output (mimicking Steps 0–8)
+    prior_output = [
+        "Simulated prior output (Steps 0–8):",
+        "✅ Step 1: Configuration loaded",
+        "✅ Step 2: Zabbix setup completed",
+        "✅ Step 3: Pods stopped",
+        "✅ Step 4: Pods deleted",
+        "✅ Step 5: Environment started",
+        "✅ Step 6: Consul pods verified",
+        "⏱️ Time taken for prior steps: 5 minutes, 30 seconds"
+    ]
+    for line in prior_output:
+        print(line)
     
     start_time = time.time()
     iteration = 0
-    table_lines = 8  # Header, subtitle, timestamp, instruction, separator, headers, data, separator
+    table_lines = 10  # Header, subtitle, separator, timestamp, instruction, separator, headers, data, separator, empty line
+    prior_lines = len(prior_output) + 2  # Prior output + separator + 1 newline
     
-    # Check if terminal supports ANSI escape codes
-    use_ansi = os.environ.get("TERM", "") != "dumb" and sys.stdout.isatty()
-    if not use_ansi:
-        print("⚠️ Warning: Terminal does not support ANSI escape codes. Appending tables instead of updating in place.")
-        logger.warning("Terminal does not support ANSI escape codes")
+    # Log terminal and environment details
+    term_type = os.environ.get("TERM", "unknown")
+    in_tmux = os.environ.get("TMUX", "no") != "no"
+    in_screen = os.environ.get("STY", "no") != "no"
+    is_tty = sys.stdout.isatty()
+    logger.info(f"Terminal type: {term_type}, TMUX: {in_tmux}, SCREEN: {in_screen}, TTY: {is_tty}")
+    
+    # Check if appending is forced or ANSI is unsupported
+    force_append = os.environ.get("FORCE_APPEND", "0") == "1"
+    use_ansi = not force_append and term_type != "dumb" and is_tty
+    
+    # Print separator with minimal padding
+    terminal_width = min(shutil.get_terminal_size().columns, 80)
+    print(f"\n{'=' * terminal_width}")  # Single newline before separator
     
     try:
         while True:
             iteration += 1
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            total_pods = running = crashloop = error = completed = 0
+            
             try:
                 cmd = ["kubectl", "get", "pods", "-n", ns, "-o", "json"]
-                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-                pods_data = json.loads(result.stdout)
-                pods = pods_data.get("items", [])
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+                pod_data = json.loads(result.stdout)
+                pods = pod_data.get("items", [])
                 
                 total_pods = len(pods)
-                running = 0
-                crashloop = 0
-                error = 0
-                completed = 0
-                
                 for pod in pods:
-                    pod_name = pod["metadata"]["name"]
                     phase = pod["status"].get("phase", "Unknown")
                     container_statuses = pod["status"].get("containerStatuses", [])
                     
@@ -1025,60 +1129,95 @@ def monitor_pods_post_restart(ns, ticket):
                     elif phase == "Running" and ready_status == f"{total_containers}/{total_containers}":
                         running += 1
                     else:
-                        error += 1  # Treat other non-terminal states as errors for simplicity
+                        error += 1
                 
-                # Get terminal width (default to 80 if unavailable)
-                terminal_width = min(shutil.get_terminal_size().columns, 80)
-                separator = "-" * terminal_width
-                
-                # Build table lines with fixed-width columns
-                table = [
-                    f"{'=' * terminal_width}",
-                    f"Step 9: 📊 Monitoring Pods Post Restart (Namespace: {ns}, Ticket: {ticket})",
-                    f"{'=' * terminal_width}",
-                    f"Timestamp: {timestamp} | Iteration: {iteration}",
-                    f"Press Ctrl+C to stop monitoring",
-                    separator,
-                    f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
-                    separator,
-                    f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
-                    separator
-                ]
-                
-                # Ensure table has exactly table_lines lines (pad with empty lines if needed)
-                while len(table) < table_lines:
-                    table.append("")
-                
-                # Print table
-                if use_ansi and iteration > 1:
-                    # Move cursor up to overwrite previous table
-                    print(f"\033[{table_lines}A", end="")
-                
-                for line in table[:table_lines]:
-                    # Clear current line and print new line
-                    print(f"\r{line:<{terminal_width}}", end="\n")
-                    sys.stdout.flush()
-                
-                # Check if all pods are in terminal states (optional auto-exit)
-                if running + completed == total_pods and crashloop == 0 and error == 0:
-                    print("\n✅ All pods are in Running or Completed states. Exiting monitoring.")
-                    break
-                
-                # Sleep before next update
-                time.sleep(5)
+                logger.debug(f"Iteration {iteration}: Total={total_pods}, Running={running}, CrashLoopBackOff={crashloop}, Error={error}, Completed={completed}")
                 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to fetch pod statuses: {e.stderr}")
-                print(f"\n❌ Error fetching pod statuses at {timestamp}: {e.stderr}")
-                time.sleep(5)
-                continue
+                print(f"❌ Error fetching pod statuses at {timestamp}: {e.stderr}")
+                total_pods = running = crashloop = error = completed = 0
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse pod JSON data: {e}")
-                print(f"\n❌ Error parsing pod data at {timestamp}: {e}")
-                time.sleep(5)
-                continue
+                print(f"❌ Error parsing pod data at {timestamp}: {e}")
+                total_pods = running = crashloop = error = completed = 0
+            except subprocess.TimeoutExpired as e:
+                logger.error(f"kubectl command timed out: {e}")
+                print(f"❌ kubectl command timed out at {timestamp}")
+                total_pods = running = crashloop = error = completed = 0
+            
+            # Build table
+            separator = "-" * terminal_width
+            table = [
+                f"{'=' * terminal_width}",
+                f"Pod Monitoring (Namespace: {ns}, Ticket: {ticket})",
+                f"{'=' * terminal_width}",
+                f"Timestamp: {timestamp} | Iteration: {iteration}",
+                f"Press Ctrl+C to stop monitoring",
+                separator,
+                f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
+                separator,
+                f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
+                separator
+            ]
+            
+            # Ensure table has exactly table_lines lines
+            while len(table) < table_lines:
+                table.append("")
+            table = table[:table_lines]
+            
+            # Print table
+            if use_ansi:
+                try:
+                    if iteration == 1:
+                        # Print table for the first time
+                        for line in table:
+                            print(line)
+                    else:
+                        # Move cursor up to the start of the table and update
+                        print(f"\033[{table_lines}A", end="")
+                        for line in table:
+                            print(f"\033[K{line}")  # Clear line and print new content
+                    sys.stdout.flush()
+                except Exception as e:
+                    logger.warning(f"ANSI rendering failed: {e}. Switching to append mode.")
+                    print(f"\n⚠️ ANSI rendering failed: {e}. Switching to append mode.")
+                    use_ansi = False
+            
+            if not use_ansi:
+                print("\n")
+                for line in table:
+                    try:
+                        print(f"{line:<{terminal_width}}")
+                        sys.stdout.flush()
+                    except Exception as e:
+                        logger.error(f"Terminal write error: {e}")
+                        print(f"❌ Terminal write error: {e}")
+            
+            # Check if all pods are in terminal states
+            if total_pods > 0 and running + completed == total_pods and crashloop == 0 and error == 0:
+                print("\n✅ All pods are in Running or Completed states. Exiting monitoring.")
+                break
+            
+            time.sleep(5)
             
     except KeyboardInterrupt:
+        separator = "-" * terminal_width
+        table = [
+            f"{'=' * terminal_width}",
+            f"Pod Monitoring (Namespace: {ns}, Ticket: {ticket})",
+            f"{'=' * terminal_width}",
+            f"Timestamp: {timestamp} | Iteration: {iteration}",
+            f"Monitoring stopped by user",
+            separator,
+            f"{'Sr. No.':<10}{'Total Pods':<12}{'Running':<10}{'CrashLoopBackOff':<18}{'Error':<10}{'Completed':<10}",
+            separator,
+            f"{iteration:<10}{total_pods:<12}{running:<10}{crashloop:<18}{error:<10}{completed:<10}",
+            separator
+        ]
+        print("\n")
+        for line in table:
+            print(f"{line:<{terminal_width}}")
         print("\n✅ Monitoring stopped by user.")
     
     end_time = time.time()
@@ -1087,6 +1226,7 @@ def monitor_pods_post_restart(ns, ticket):
     seconds = int(duration_seconds % 60)
     print(f"\n✅ Pod monitoring completed")
     print(f"⏱️ Time taken to monitor pods: {minutes} minutes, {seconds} seconds")
+
 
 def main():
     has_update, latest_version = check_for_updates()
@@ -1118,7 +1258,8 @@ def main():
     
     print(f"\n🚀 Starting SAS Viya 4 Environment Restart Automation")
     print(f"Configuration Item: {ci}")
-    print(f"Ticket Number: {ticket}\n")
+    print(f"Ticket Number: {ticket}")
+    print(f"📝 Logs are written to: {log_file}\n")
     
     # Print index page
     print_index_page()
