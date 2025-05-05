@@ -37,7 +37,7 @@ for handler in logger.handlers[:]:  # Copy to avoid modifying while iterating
 logger.addHandler(console_handler)
 
 # Version and GitHub settings
-SCRIPT_VERSION = "v1.5.1"
+SCRIPT_VERSION = "v1.5.2"
 GITHUB_REPO = "ankush-deshpande17/script"
 GITHUB_BRANCH = "main"
 VERSION_FILE = "restart_version.txt"
@@ -128,7 +128,8 @@ def parse_ci(ci):
     env_vars = {
         'NS': ns,
         'AKSN': aksn,
-        'RGN': rgn
+        'RGN': rgn,
+        'TLA': tla  # Add TLA for Zabbix maintenance check
     }
     
     print("✅ Environment Variables Initialized:")
@@ -137,12 +138,176 @@ def parse_ci(ci):
     
     return env_vars
 
+def check_zabbix_maintenance(tla, ci, vsp_user, vsp_pass):
+    """Check if the environment is already under Zabbix maintenance"""
+    zabbix_script = "/home/anzdes/viya-upgrade-scripts/zabbixClient-v2.0"
+    
+    if not os.path.isfile(zabbix_script):
+        logger.warning(f"Zabbix script not found at {zabbix_script}. Skipping maintenance check.")
+        return False, []
+    if not os.access(zabbix_script, os.X_OK):
+        logger.warning(f"Zabbix script at {zabbix_script} is not executable. Skipping maintenance check.")
+        return False, []
+    
+    cmd = [zabbix_script, "list", f"--tla={tla}"]
+    log_file = f"/tmp/zabbix_list_{tla}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    
+    logger.debug(f"Executing Zabbix list command: {' '.join(cmd)}")
+    
+    try:
+        with open(log_file, 'w') as log:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            process.stdin.write(f"{vsp_user}\n")
+            process.stdin.write(f"{vsp_pass}\n")
+            process.stdin.flush()
+            
+            stdout_lines = []
+            stderr_lines = []
+            timeout_seconds = 60
+            start_time = time.time()
+            
+            while process.poll() is None:
+                if time.time() - start_time > timeout_seconds:
+                    process.terminate()
+                    logger.error(f"Zabbix list command timed out after {timeout_seconds} seconds")
+                    return False, []
+                
+                stdout_line = process.stdout.readline()
+                if stdout_line:
+                    log.write(stdout_line)
+                    stdout_lines.append(stdout_line)
+                
+                stderr_line = process.stderr.readline()
+                if stderr_line:
+                    log.write(stderr_line)
+                    stderr_lines.append(stderr_line)
+                
+                time.sleep(0.1)
+            
+            stdout, stderr = process.communicate()
+            if stdout:
+                log.write(stdout)
+                stdout_lines.append(stdout)
+            if stderr:
+                log.write(stderr)
+                stderr_lines.append(stderr)
+            
+            if process.returncode != 0:
+                logger.error(f"Zabbix list command failed: {''.join(stderr_lines) or ''.join(stdout_lines)}")
+                return False, []
+        
+        # Parse the output
+        output = ''.join(stdout_lines)
+        
+        lines = output.splitlines()
+        maintenance_records = []
+        filtered_records = []
+        in_table = False
+        header = None
+        
+        # Construct target host group name
+        env_map = {
+            'PROD': 'PROD',
+            'DEV': 'DEV',
+            # Add other environments as needed
+        }
+        match = re.match(r'^([A-Z]{3})_(.+)_VIYA4_([A-Z]+)$', ci)
+        if not match:
+            logger.error(f"Invalid CI format for constructing host group: {ci}")
+            return False, []
+        
+        tla, middle, env = match.groups()
+        env_display = env_map.get(env, env)
+        target_host_group = f"{tla} (VML VIYA4 {env_display})"
+        logger.debug(f"Target host group: {target_host_group}")
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if 'Host Group ID |Host Group Name' in line:
+                in_table = True
+                header = [h.strip() for h in line.split('|')]
+                logger.debug(f"Table header: {header}")
+                continue
+            if in_table and '|' in line:
+                try:
+                    fields = [f.strip() for f in line.split('|')]
+                    if len(fields) < len(header):
+                        logger.warning(f"Skipping malformed table row: {line}")
+                        continue
+                    record = dict(zip(header, fields))
+                    if 'Host Group Name' not in record:
+                        logger.warning(f"Skipping row missing Host Group Name: {line}")
+                        continue
+                    # Filter for target host group
+                    if record['Host Group Name'] == target_host_group:
+                        filtered_records.append(line)
+                        if record.get('IsInMaintenance', '').lower() == 'true':
+                            maintenance_records.append({
+                                'MaintenanceID': record.get('MaintenanceID', 'N/A'),
+                                'MaintenanceName': record.get('MaintenanceName', 'N/A')
+                            })
+                except Exception as e:
+                    logger.warning(f"Failed to parse table row: {line}, Error: {e}")
+                    continue
+        
+        # Log filtered records instead of full output
+        if filtered_records:
+            logger.debug(f"Filtered Zabbix output for {target_host_group}:\n{'Host Group ID |Host Group Name          |IsInMaintenance |MaintenanceID |MaintenanceName'}\n" + '\n'.join(filtered_records))
+        else:
+            logger.debug(f"No records found for host group {target_host_group}")
+        
+        is_in_maintenance = bool(maintenance_records)
+        if is_in_maintenance:
+            logger.info(f"Environment {target_host_group} is under maintenance: {maintenance_records}")
+        else:
+            logger.info(f"No maintenance found for environment {target_host_group}")
+        
+        return is_in_maintenance, maintenance_records
+    
+    except Exception as e:
+        logger.error(f"Failed to check Zabbix maintenance: {str(e)}")
+        return False, []
+
 def setup_zabbix_maintenance(ci, ticket, duration):
     """Step 1: Setup Zabbix Maintenance"""
     print_step_header(1, "Setup Zabbix Maintenance", "🛠️")
     
     zabbix_script = "/home/anzdes/viya-upgrade-scripts/zabbixClient-v2.0"
     
+    # Extract TLA from CI
+    tla_match = re.match(r'^([A-Z]{3})_', ci)
+    if not tla_match:
+        print(f"❌ Error: Cannot extract TLA from Configuration Item: {ci}")
+        sys.exit(1)
+    tla = tla_match.group(1)
+    
+    # Prompt for credentials
+    vsp_user = input("👤 Enter VSP userid: ")
+    vsp_pass = getpass.getpass("🔑 Enter VSP Password: ")
+    
+    # Check for existing maintenance
+    print(f"🔍 Checking for existing Zabbix maintenance for TLA: {tla}")
+    is_in_maintenance, maintenance_records = check_zabbix_maintenance(tla, ci, vsp_user, vsp_pass)
+    
+    if is_in_maintenance:
+        print(f"\n⚠️ Environment for {ci} is already under maintenance. Skipping maintenance creation.")
+        print("📋 Active Maintenance Details:")
+        for record in maintenance_records:
+            print(f"- Maintenance ID: {record['MaintenanceID']}, Name: {record['MaintenanceName']}")
+        return
+    
+    # Proceed with maintenance creation if no existing maintenance
     if not os.path.isfile(zabbix_script):
         print(f"❌ Error: Zabbix script not found at {zabbix_script}")
         sys.exit(1)
@@ -162,10 +327,7 @@ def setup_zabbix_maintenance(ci, ticket, duration):
         f"--duration={duration}"
     ]
     
-    print(f"🔍 Executing Zabbix maintenance command: {' '.join(cmd)}")
-    
-    vsp_user = input("👤 Enter VSP userid: ")
-    vsp_pass = getpass.getpass("🔑 Enter VSP Password: ")
+    print(f"\n🔍 Executing Zabbix maintenance command: {' '.join(cmd)}")
     
     log_file = f"/tmp/zabbix_{ticket}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     print(f"📝 Logging Zabbix command output to: {log_file}")
@@ -1029,12 +1191,7 @@ def verify_consul_pods(ns, ticket):
     print(f"⏱️ Time taken to verify consul pods: {minutes} minutes, {seconds} seconds")
 
 def monitor_pods(namespace, ticket):
-    """Step 9: Monitor pod statuses with a single table updated in place using ANSI codes.
-    
-    Args:
-        namespace (str): Kubernetes namespace to monitor.
-        ticket (str): Ticket number for tracking (e.g., 'NSE-123').
-    """
+    """Step 9: Monitor pod statuses with a single table updated in place using ANSI codes"""
     print_step_header(9, "Monitoring Pods Post Restart", "📊")
     
     # Set up logging with file output for DEBUG and console output for INFO
@@ -1228,7 +1385,7 @@ def main():
     has_update, latest_version = check_for_updates()
     if has_update:
         logger.info(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
-        print(f"New version {latest_version} is available. Current version: {SCRIPT_VERSION}")
+        print(f"New version {latest_version} is available. Current version:> {SCRIPT_VERSION}")
         user_choice = input("Would you like to update? (Yes/No): ").strip().lower()
         logger.info(f"User chose to {'update' if user_choice == 'yes' else 'skip update'}")
         if user_choice == 'yes':
