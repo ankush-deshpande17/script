@@ -140,7 +140,7 @@ def parse_ci(ci):
 
 def check_zabbix_maintenance(tla, ci, vsp_user, vsp_pass):
     """Check if the environment is already under Zabbix maintenance"""
-    zabbix_script = "/home/anzdes/viya-upgrade-scripts/zabbixClient-v2.0"
+    zabbix_script = "/home/anzdes/script/zabbixClient-v2.0"
     
     if not os.path.isfile(zabbix_script):
         logger.warning(f"Zabbix script not found at {zabbix_script}. Skipping maintenance check.")
